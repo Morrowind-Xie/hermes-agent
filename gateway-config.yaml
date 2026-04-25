@@ -1,0 +1,6 @@
+gateway:
+  platforms:
+    api_server:
+      enabled: true
+      host: localhost
+      port: 8642
