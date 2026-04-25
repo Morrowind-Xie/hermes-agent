@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-04-25: DeepSeek reasoning_content 导致 auxiliary memory flush 400（第五次）
+
+### 症状
+```
+⚠ Auxiliary memory flush failed: HTTP 400: The `reasoning_content` in the thinking mode must be passed back to the API.
+```
+
+### 根本原因
+`flush_memories()` 在构建 `api_messages` 时调用了 `_copy_reasoning_content_for_api()`，这会给所有 DeepSeek/Kimi 会话中的 assistant 消息写入 `reasoning_content=""`。这些消息随后被传给 `auxiliary_client.call_llm()`，而 auxiliary client 使用的是非 DeepSeek provider（OpenRouter/Nous Portal 等），这些 provider 不接受 `reasoning_content` 字段，返回 400。
+
+前四次修复只处理了主 agent 的 API 调用路径，没有覆盖 auxiliary client 路径。
+
+### 修复方案（commit `e50ba5d2`）
+
+在 `agent/auxiliary_client.py` 的 `_build_call_kwargs()` 中，发送前统一过滤 assistant 消息的 `reasoning_content` 字段：
+
+```python
+cleaned_messages = []
+for m in messages:
+    if m.get("role") == "assistant" and "reasoning_content" in m:
+        m = {k: v for k, v in m.items() if k != "reasoning_content"}
+    cleaned_messages.append(m)
+kwargs["messages"] = cleaned_messages
+```
+
+选择在 `_build_call_kwargs()` 修复而非 `flush_memories()`，因为 auxiliary client 永远不会是 DeepSeek thinking mode，所有辅助任务（flush_memories、compression、session_search 等）都受保护。
+
+### 验证
+- gateway 已重启
+- fork/main 推送至 `e50ba5d2`
+
+---
+
 ## 2026-04-25: DEVELOPMENT_LOG.md 自动备份保护机制
 
 ### 背景
