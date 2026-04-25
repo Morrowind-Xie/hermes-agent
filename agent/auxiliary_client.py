@@ -3211,6 +3211,21 @@ def _build_call_kwargs(
     if tools:
         kwargs["tools"] = tools
 
+    # Strip DeepSeek/Kimi thinking-mode fields that are never valid for
+    # auxiliary providers (OpenRouter, Nous, custom endpoints, etc.).
+    # When the main agent runs in DeepSeek thinking mode, every assistant
+    # message in the session has reasoning_content="". Passing those messages
+    # verbatim to a non-DeepSeek auxiliary API causes HTTP 400:
+    # "The reasoning_content in the thinking mode must be passed back."
+    # Auxiliary tasks always use a standard chat-completions provider, so
+    # these fields must be stripped before the call.
+    cleaned_messages = []
+    for m in messages:
+        if m.get("role") == "assistant" and "reasoning_content" in m:
+            m = {k: v for k, v in m.items() if k != "reasoning_content"}
+        cleaned_messages.append(m)
+    kwargs["messages"] = cleaned_messages
+
     # Provider-specific extra_body
     merged_extra = dict(extra_body or {})
     if provider == "nous" or auxiliary_is_nous:
