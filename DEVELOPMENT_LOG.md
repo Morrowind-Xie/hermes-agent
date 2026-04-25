@@ -4,6 +4,28 @@
 
 ---
 
+## 2026-04-25: DEVELOPMENT_LOG.md 自动备份保护机制
+
+### 背景
+rebase 同步上游时 force push 导致旧版日志丢失（需从旧 fork commit `ff9de403` 人工恢复），因此建立自动备份机制。
+
+### 实现
+**git pre-commit hook**（`.git/hooks/pre-commit`）：每次 `git commit` 前自动将 `DEVELOPMENT_LOG.md` 备份到 `~/.hermes/doc-backups/DEVELOPMENT_LOG_YYYYMMDD-HHMMSS.md`，保留最近 100 个版本，超出自动删除最旧的。
+
+### 恢复方式
+```bash
+# 列出所有备份
+ls -lt ~/.hermes/doc-backups/
+
+# 恢复最新备份
+cp ~/.hermes/doc-backups/$(ls -t ~/.hermes/doc-backups/ | head -1) DEVELOPMENT_LOG.md
+```
+
+### 注意
+git hooks 不随 `git push` 同步到远程，换机器后需手动重建 hook。
+
+---
+
 ## 2026-04-25: 同步上游至最新 + DeepSeek reasoning_content 全覆盖补丁（第四次）
 
 ### 背景
