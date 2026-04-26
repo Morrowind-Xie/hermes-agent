@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-04-26: OfficeAI (WPS) 通过 OpenAI 兼容接口接入 Hermes
+
+### 背景
+用户在 Windows 侧安装了 WPS OfficeAI 插件，希望通过 Hermes 的 API server 接入本地 AI 能力。
+
+### 调试过程
+
+**1. 确认 API server 功能**
+Hermes gateway 内置 OpenAI 兼容的 api_server platform，端点为 `/v1/chat/completions` 和 `/v1/models`。
+
+**2. 网络连通性问题：`192.168.x.x` 不可达**
+初始思路是将 `host` 改为 `0.0.0.0` 并使用 WSL 局域网 IP（`192.168.10.102`）。Windows 侧测试：
+```
+无法连接到远程服务器
+```
+根本原因：`192.168.10.102` 是物理机的局域网 IP，不是 WSL 的虚拟网卡 IP，Windows 无法通过它路由到 WSL。
+
+**3. 发现 WSL2 使用 mirrored 网络模式**
+WSL2 mirrored 模式下，WSL 内部监听的端口会自动映射到 Windows 的 `localhost`，无需 IP 转发或端口代理。
+
+PowerShell 验证成功：
+```powershell
+Invoke-RestMethod -Uri "http://localhost:8642/v1/models" -Headers @{Authorization="Bearer hermes-local"}
+# 返回：object=list, data=[{id=hermes-agent, ...}]
+```
+
+Chat 接口验证：
+```powershell
+$body = '{"model":"hermes-agent","messages":[{"role":"user","content":"你好，请回复一句话"}]}'
+$resp = Invoke-RestMethod -Uri "http://localhost:8642/v1/chat/completions" -Method Post -Headers @{Authorization="Bearer hermes-local"; "Content-Type"="application/json"} -Body $body
+$resp.choices[0].message.content
+```
+返回正常 AI 回复，验证成功。
+
+**4. 配置 OfficeAI 插件**
+- 服务商平台：自定义（OpenAI协议）
+- API 代理地址：`http://localhost:8642/v1`（不能带 `/chat/completions`，否则刷新模型时会拼接成错误路径）
+- API_KEY：`hermes-local`
+- 模型名称：手动填写 `hermes-agent`（不依赖"刷新模型"按钮）
+
+**5. 安全加固：恢复 host 为 127.0.0.1**
+mirrored 模式下 `0.0.0.0` 会将端口暴露到局域网，存在安全风险。恢复配置：
+- `gateway-config.yaml`：`host: localhost`
+- `~/.hermes/config.yaml`：`host: 127.0.0.1`
+- `~/.hermes/.env`：注释掉 `API_SERVER_HOST=0.0.0.0`
+
+`API_SERVER_KEY=hermes-local` 保留（安全访问控制）。
+
+### 最终 OfficeAI 配置
+| 字段 | 值 |
+|------|-----|
+| API 代理地址 | `http://localhost:8642/v1` |
+| API_KEY | `hermes-local` |
+| 模型名称 | `hermes-agent`（手动填写） |
+
+### 经验总结
+- WSL2 mirrored 模式：Windows 侧直接用 `localhost` 访问 WSL 服务，无需改 host 为 `0.0.0.0`
+- OfficeAI 的 API 地址应填 Base URL（`/v1`），不要填完整端点路径
+- "刷新模型"按钮不可靠时，直接手动填模型名称保存即可
+
+---
+
 ## 2026-04-25: DeepSeek reasoning_content 导致 auxiliary memory flush 400（第五次）
 
 ### 症状
