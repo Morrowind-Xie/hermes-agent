@@ -2214,6 +2214,115 @@ class HermesCLI:
         self._background_tasks: Dict[str, threading.Thread] = {}
         self._background_task_counter = 0
 
+        # Bridge state: mirror TUI conversations to a messaging platform session.
+        # Set via /bridge <platform> <chat_id>, cleared via /bridge off.
+        self._bridge_platform: Optional[str] = None
+        self._bridge_chat_id: Optional[str] = None
+
+    # ------------------------------------------------------------------
+    # Bridge: mirror TUI conversations to a messaging-platform session
+    # ------------------------------------------------------------------
+
+    def _bridge_subscription_path(self) -> "Path":
+        """Return path to the bridge subscription file (persists across restarts)."""
+        return get_hermes_home() / "bridge_subscription.json"
+
+    def _bridge_attach(self, platform: str, chat_id: str) -> None:
+        """Activate bridge and persist subscription."""
+        import json as _json
+        self._bridge_platform = platform.strip().lower()
+        self._bridge_chat_id = chat_id.strip()
+        try:
+            sub_path = self._bridge_subscription_path()
+            sub_path.write_text(
+                _json.dumps({"platform": self._bridge_platform, "chat_id": self._bridge_chat_id}),
+                encoding="utf-8",
+            )
+        except Exception as _e:
+            logger.debug("bridge: failed to persist subscription: %s", _e)
+
+    def _bridge_detach(self) -> None:
+        """Deactivate bridge and remove subscription file."""
+        self._bridge_platform = None
+        self._bridge_chat_id = None
+        try:
+            sub_path = self._bridge_subscription_path()
+            if sub_path.exists():
+                sub_path.unlink()
+        except Exception as _e:
+            logger.debug("bridge: failed to remove subscription: %s", _e)
+
+    def _bridge_send(self, text: str) -> None:
+        """Send *text* to the currently bridged platform chat (fire-and-forget)."""
+        if not self._bridge_platform or not self._bridge_chat_id or not text:
+            return
+        platform = self._bridge_platform
+        chat_id = self._bridge_chat_id
+
+        def _do_send() -> None:
+            import asyncio as _asyncio
+            try:
+                if platform == "weixin":
+                    from gateway.platforms.weixin import send_weixin_direct
+                    import os as _os
+                    extra = {
+                        "account_id": _os.getenv("WEIXIN_ACCOUNT_ID", ""),
+                        "base_url": _os.getenv("WEIXIN_BASE_URL", ""),
+                    }
+                    token = _os.getenv("WEIXIN_TOKEN", "")
+                    _asyncio.run(
+                        send_weixin_direct(
+                            extra=extra,
+                            token=token,
+                            chat_id=chat_id,
+                            message=text,
+                        )
+                    )
+                else:
+                    logger.debug("bridge: unsupported platform %s", platform)
+            except Exception as _e:
+                logger.debug("bridge send error (%s): %s", platform, _e)
+
+        import threading as _threading
+        _t = _threading.Thread(target=_do_send, daemon=True)
+        _t.start()
+
+    def _handle_bridge_command(self, cmd: str) -> None:
+        """Handle /bridge [<platform> <chat_id> | off | status]."""
+        parts = cmd.strip().split(None, 2)
+        # parts[0] is '/bridge'
+        if len(parts) < 2 or parts[1].lower() in ("off", "detach", "none"):
+            if self._bridge_platform:
+                old = f"{self._bridge_platform}:{self._bridge_chat_id}"
+                self._bridge_detach()
+                self._console_print(f"  Bridge detached (was {old})")
+            else:
+                self._console_print("  No bridge active.")
+            return
+
+        sub = parts[1].lower()
+        if sub == "status":
+            if self._bridge_platform:
+                self._console_print(
+                    f"  Bridge active → {self._bridge_platform}:{self._bridge_chat_id}"
+                )
+            else:
+                self._console_print("  No bridge active.")
+            return
+
+        # /bridge <platform> <chat_id>
+        if len(parts) < 3:
+            self._console_print("  Usage: /bridge <platform> <chat_id>  |  /bridge off  |  /bridge status")
+            return
+
+        platform = parts[1].lower()
+        chat_id = parts[2].strip()
+        self._bridge_attach(platform, chat_id)
+        self._console_print(f"  Bridge activated → {platform}:{chat_id}")
+        self._console_print("  TUI conversations will be mirrored to that chat. Use /bridge off to detach.")
+
+    # ------------------------------------------------------------------
+
     def _invalidate(self, min_interval: float = 0.25) -> None:
         """Throttled UI repaint — prevents terminal blinking on slow/SSH connections."""
         now = time.monotonic()
@@ -6328,6 +6437,8 @@ class HermesCLI:
             self._handle_branch_command(cmd_original)
         elif canonical == "save":
             self.save_conversation()
+        elif canonical == "bridge":
+            self._handle_bridge_command(cmd_original)
         elif canonical == "cron":
             self._handle_cron_command(cmd_original)
         elif canonical == "curator":
@@ -9142,6 +9253,29 @@ class HermesCLI:
                 except Exception:
                     pass
 
+            # Bridge sync: mirror completed TUI conversation to bridged platform.
+            if (
+                self._bridge_platform
+                and self._bridge_chat_id
+                and response
+                and not (result and (result.get("failed") or result.get("partial") or result.get("interrupted")))
+            ):
+                try:
+                    if isinstance(message, str):
+                        _user_text = message.strip()
+                    elif isinstance(message, list):
+                        _parts = [b.get("text", "") for b in message if isinstance(b, dict) and b.get("type") == "text"]
+                        _user_text = " ".join(_parts).strip()
+                        if any(b.get("type") in ("image_url", "image") for b in message if isinstance(b, dict)):
+                            _user_text = (_user_text + " [含图片]").strip()
+                    else:
+                        _user_text = ""
+                    if _user_text:
+                        self._bridge_send(f"[TUI] 你：{_user_text}")
+                    self._bridge_send(f"[TUI] Hermes：{response}")
+                except Exception as _be:
+                    logger.debug("bridge forward error: %s", _be)
+
             # Handle failed or partial results (e.g., non-retryable errors, rate limits,
             # truncated output, invalid tool calls). Both "failed" and "partial" with
             # an empty final_response mean the agent couldn't produce a usable answer.
@@ -9617,7 +9751,23 @@ class HermesCLI:
             )
             self._startup_skills_line_shown = True
         self._console_print()
-        
+
+        # Auto-restore bridge subscription from previous session
+        try:
+            import json as _json
+            _sub_path = self._bridge_subscription_path()
+            if _sub_path.exists():
+                _sub = _json.loads(_sub_path.read_text(encoding="utf-8"))
+                if _sub.get("platform") and _sub.get("chat_id"):
+                    self._bridge_platform = _sub["platform"]
+                    self._bridge_chat_id = _sub["chat_id"]
+                    self._console_print(
+                        f"  [dim]Bridge auto-restored → {self._bridge_platform}:{self._bridge_chat_id} "
+                        f"(use /bridge off to detach)[/dim]"
+                    )
+        except Exception:
+            pass  # non-critical, never block startup
+
         # State for async operation
         self._agent_running = False
         self._pending_input = queue.Queue()     # For normal input (commands + new queries)
