@@ -2261,19 +2261,41 @@ class HermesCLI:
 
         def _do_send() -> None:
             import asyncio as _asyncio
+            import os as _os
             try:
                 if platform == "weixin":
                     from gateway.platforms.weixin import send_weixin_direct
-                    import os as _os
-                    extra = {
-                        "account_id": _os.getenv("WEIXIN_ACCOUNT_ID", ""),
-                        "base_url": _os.getenv("WEIXIN_BASE_URL", ""),
-                    }
-                    token = _os.getenv("WEIXIN_TOKEN", "")
+                    # Read token/account_id from config.yaml first, fall back to env vars.
+                    _token = ""
+                    _account_id = ""
+                    _base_url = ""
+                    try:
+                        import yaml as _yaml
+                        _cfg_path = get_hermes_home() / "config.yaml"
+                        if _cfg_path.exists():
+                            _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                            _wx_cfg = (
+                                _cfg.get("gateway", {}).get("platforms", {}).get("weixin")
+                                or _cfg.get("platforms", {}).get("weixin")
+                                or {}
+                            )
+                            _token = str(_wx_cfg.get("token") or "").strip()
+                            _account_id = str((_wx_cfg.get("extra") or {}).get("account_id") or "").strip()
+                            _base_url = str((_wx_cfg.get("extra") or {}).get("base_url") or "").strip()
+                    except Exception as _ce:
+                        logger.debug("bridge: failed to read weixin config from yaml: %s", _ce)
+                    # Fall back to environment variables
+                    if not _token:
+                        _token = _os.getenv("WEIXIN_TOKEN", "")
+                    if not _account_id:
+                        _account_id = _os.getenv("WEIXIN_ACCOUNT_ID", "")
+                    if not _base_url:
+                        _base_url = _os.getenv("WEIXIN_BASE_URL", "")
+                    extra = {"account_id": _account_id, "base_url": _base_url}
                     _asyncio.run(
                         send_weixin_direct(
                             extra=extra,
-                            token=token,
+                            token=_token,
                             chat_id=chat_id,
                             message=text,
                         )
@@ -9752,19 +9774,40 @@ class HermesCLI:
             self._startup_skills_line_shown = True
         self._console_print()
 
-        # Auto-restore bridge subscription from previous session
+        # Auto-restore bridge: priority → subscription.json > config.yaml bridge: section
         try:
             import json as _json
+            _restored = False
             _sub_path = self._bridge_subscription_path()
             if _sub_path.exists():
                 _sub = _json.loads(_sub_path.read_text(encoding="utf-8"))
                 if _sub.get("platform") and _sub.get("chat_id"):
                     self._bridge_platform = _sub["platform"]
                     self._bridge_chat_id = _sub["chat_id"]
-                    self._console_print(
-                        f"  [dim]Bridge auto-restored → {self._bridge_platform}:{self._bridge_chat_id} "
-                        f"(use /bridge off to detach)[/dim]"
-                    )
+                    _restored = True
+            if not _restored:
+                # Fall back to config.yaml bridge: section
+                try:
+                    import yaml as _yaml
+                    _cfg_path = get_hermes_home() / "config.yaml"
+                    if _cfg_path.exists():
+                        _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                        _br = _cfg.get("bridge", {})
+                        # Support both flat {platform, chat_id} and {default: {platform, chat_id}}
+                        if isinstance(_br, dict):
+                            _plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                            _cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                            if _plat and _cid:
+                                self._bridge_platform = _plat
+                                self._bridge_chat_id = _cid
+                                _restored = True
+                except Exception:
+                    pass
+            if _restored:
+                self._console_print(
+                    f"  [dim]Bridge auto-restored → {self._bridge_platform}:{self._bridge_chat_id} "
+                    f"(use /bridge off to detach)[/dim]"
+                )
         except Exception:
             pass  # non-critical, never block startup
 
