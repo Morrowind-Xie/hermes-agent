@@ -4,6 +4,44 @@
 
 ---
 
+## 2026-05-01: 微信→TUI 双向同步实现
+
+### 背景
+
+之前 bridge 只实现了 TUI→微信（TUI 回答后推送到微信），用户希望双向：微信发消息时 TUI 也能显示。
+
+### 实现方案
+
+**架构**：gateway（微信进程）→ `bridge_inbox.jsonl` 文件 → cli.py 后台轮询线程 → TUI 显示
+
+**gateway/run.py 修改**（`agent:end` emit 之后）：
+```python
+_inbox = _ghh() / "bridge_inbox.jsonl"
+if _inbox.exists() or (_ghh() / "bridge_subscription.json").exists():
+    _entry = {"ts": ..., "platform": ..., "chat_id": ..., "user_msg": ..., "response": ...}
+    with _inbox.open("a") as _f:
+        _f.write(json.dumps(_entry) + "\n")
+```
+只有当 bridge 已激活（存在 subscription.json 或 inbox 文件）时才写，避免无谓 I/O。
+
+**cli.py 修改**：
+- `__init__`: 新增 `_bridge_inbox_stop: Optional[threading.Event]`
+- `_bridge_attach()`: 激活时调用 `_bridge_start_inbox_watcher()`
+- `_bridge_detach()`: 停止 watcher，清理 inbox 文件
+- `run()` 自动恢复: 恢复后也启动 watcher
+- `_bridge_start_inbox_watcher()`: 后台线程每 2 秒轮询 inbox，过滤同平台同 chat_id 的条目，用 `_console_print` 显示：
+  ```
+  [weixin] 用户：xxx
+  [weixin] Hermes：yyy
+  ```
+
+### 经验总结
+
+- 微信 gateway 和 TUI cli 是两个独立进程，跨进程通信用文件队列（JSONL append）是最简单可靠的方案
+- gateway 写、cli 读，只需在 cli 侧轮询，无需额外 IPC 框架
+
+---
+
 ## 2026-05-01: TUI→微信桥接无法同步——token 读取路径错误修复
 
 ### 症状
