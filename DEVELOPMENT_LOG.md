@@ -4,6 +4,67 @@
 
 ---
 
+## 2026-05-01: TUI↔微信桥接（bridge sync）在 upstream rebase 后丢失并恢复
+
+### 症状
+
+用户发现微信端不再同步显示 TUI 对话，`/bridge` 命令不可用。
+
+### 根本原因
+
+2026-04-18 实现的 TUI→微信桥接功能（`_bridge_platform`/`_bridge_send`/`bridge_queue.py`）从未被单独 commit，修改直接存在于工作目录。2026-04-28 执行 `git rebase origin/main`（794 个 commit）时，`cli.py` 被上游大幅重写，未 commit 的本地改动被 stash pop 后被覆盖，整套桥接逻辑消失。
+
+### 重新实现方案
+
+相比原版简化了架构：去掉了 `gateway/bridge_queue.py` 中间文件队列，改为直接在后台线程中调用 `send_weixin_direct()`，更简单可靠。
+
+**实现文件**：`cli.py`、`hermes_cli/commands.py`
+
+**核心组件**：
+```python
+# __init__ 里的状态
+self._bridge_platform: Optional[str] = None
+self._bridge_chat_id: Optional[str] = None
+
+# 辅助方法
+_bridge_subscription_path()  → $HERMES_HOME/bridge_subscription.json
+_bridge_attach(platform, chat_id)  → 激活并持久化
+_bridge_detach()               → 取消并删除订阅文件
+_bridge_send(text)             → 后台线程调用 send_weixin_direct()
+_handle_bridge_command(cmd)    → /bridge 命令处理器
+```
+
+**`chat()` 里的转发逻辑**（`final_response` 取得后）：
+```python
+if self._bridge_platform and self._bridge_chat_id and response \
+        and not (result and (result.get("failed") or ...)):
+    self._bridge_send(f"[TUI] 你：{_user_text}")
+    self._bridge_send(f"[TUI] Hermes：{response}")
+```
+
+**`run()` 里的自动恢复**：
+```python
+# 启动时读取 bridge_subscription.json，自动恢复上次桥接
+_sub = json.loads(_sub_path.read_text())
+if _sub.get("platform") and _sub.get("chat_id"):
+    self._bridge_platform = _sub["platform"]
+    self._bridge_chat_id = _sub["chat_id"]
+```
+
+**命令注册**（`hermes_cli/commands.py`）：
+```
+/bridge <platform> <chat_id>  — 激活桥接（别名 /br）
+/bridge off                   — 取消桥接
+/bridge status                — 查看当前状态
+```
+
+### 经验总结
+
+- **未 commit 的本地修改在 rebase 时极易丢失**，即使 stash 也可能被上游大改动覆盖。今后所有本地功能必须立即 commit。
+- 新架构比原版更简单：直接调用 `send_weixin_direct()` 而非文件队列 IPC，减少了一个中间层。
+
+---
+
 ## 2026-04-26: OfficeAI (WPS) 通过 OpenAI 兼容接口接入 Hermes
 
 ### 背景
