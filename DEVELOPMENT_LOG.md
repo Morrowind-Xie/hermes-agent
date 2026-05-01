@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-05-01: TUI→微信桥接无法同步——token 读取路径错误修复
+
+### 症状
+
+重启 TUI 后微信端仍无法收到消息，`/bridge status` 未显示（桥接未激活）。
+
+### 根本原因
+
+两个独立问题：
+
+1. **subscription.json 不存在**：桥接功能恢复后从未执行过 `/bridge weixin <chat_id>`，所以 `bridge_subscription.json` 不存在，`run()` 里的自动恢复逻辑读不到任何配置，导致桥接未激活。
+
+2. **token 读取路径错误**：`_bridge_send()` 只从环境变量 `WEIXIN_TOKEN`/`WEIXIN_ACCOUNT_ID` 读取凭证，但实际配置存放在 `~/.hermes/config.yaml` 的 `platforms.weixin.token` 和 `platforms.weixin.extra.account_id` 中，systemd 服务不会自动注入这些环境变量。
+
+### 修复方案
+
+**`_bridge_send()` 修复**：优先从 config.yaml 读取 token/account_id，环境变量作为后备：
+```python
+_wx_cfg = (
+    _cfg.get("gateway", {}).get("platforms", {}).get("weixin")
+    or _cfg.get("platforms", {}).get("weixin")
+    or {}
+)
+_token = str(_wx_cfg.get("token") or "").strip()
+_account_id = str((_wx_cfg.get("extra") or {}).get("account_id") or "").strip()
+```
+
+**`run()` 自动恢复修复**：当 `bridge_subscription.json` 不存在时，回退读取 config.yaml 的 `bridge:` 配置块：
+```yaml
+# ~/.hermes/config.yaml
+bridge:
+  default:
+    platform: weixin
+    chat_id: o9cq807-0UUke4yw0AOz2kVnIcLA@im.wechat
+```
+代码读取 `bridge.platform` 或 `bridge.default.platform`，`bridge.chat_id` 或 `bridge.default.chat_id`。
+
+### 经验总结
+
+- config.yaml 是 hermes-agent 的权威配置源，凡是需要读取平台凭证的功能，必须从 config.yaml 的 `platforms.<name>` 路径读取，不能假设环境变量已注入。
+- `bridge:` 配置块已在 config.yaml 中持久化，无需再依赖独立的 `bridge_subscription.json` 文件作为主配置来源。
+
+---
+
 ## 2026-05-01: TUI↔微信桥接（bridge sync）在 upstream rebase 后丢失并恢复
 
 ### 症状
