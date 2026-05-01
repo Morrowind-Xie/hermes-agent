@@ -2219,6 +2219,7 @@ class HermesCLI:
         self._bridge_platform: Optional[str] = None
         self._bridge_chat_id: Optional[str] = None
         self._bridge_inbox_stop: Optional["threading.Event"] = None  # signals inbox watcher to stop
+        self._bridge_progress_notified: bool = False  # True once we've sent a ⚙️ progress msg this turn
 
     # ------------------------------------------------------------------
     # Bridge: mirror TUI conversations to a messaging-platform session
@@ -2313,6 +2314,9 @@ class HermesCLI:
                                                 f"\n[bold cyan][{_plat} → TUI][/] {_user}"
                                             )
                                             if hasattr(self, '_pending_input'):
+                                                # Reset progress notified flag so the first
+                                                # tool call in this new turn sends a notification
+                                                self._bridge_progress_notified = False
                                                 self._pending_input.put(
                                                     f"[来自微信的消息] {_user}"
                                                 )
@@ -8057,6 +8061,18 @@ class HermesCLI:
                 function_args if function_args is not None else {}
             )
             self._invalidate()
+            # Bridge progress: send a single ⚙️ notification to the bridged platform
+            # on the first tool call of this turn (avoid flooding with one msg per tool).
+            if (
+                self._bridge_platform
+                and self._bridge_chat_id
+                and not self._bridge_progress_notified
+            ):
+                self._bridge_progress_notified = True
+                try:
+                    self._bridge_send(f"⚙️ {emoji} {label}...")
+                except Exception:
+                    pass
 
         if not self._voice_mode:
             return

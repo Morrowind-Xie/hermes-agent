@@ -10907,15 +10907,47 @@ class GatewayRunner:
             if not adapter:
                 return
 
-            # Skip tool progress for platforms that don't support message
-            # editing (e.g. iMessage/BlueBubbles) — each progress update
-            # would become a separate message bubble, which is noisy.
+            # Platforms that don't support message editing (e.g. WeChat/BlueBubbles):
+            # instead of silently dropping all progress events, send a single
+            # "working..." notification when the first tool fires, then suppress
+            # further individual-tool bubbles to avoid flooding the chat.
             if type(adapter).edit_message is BasePlatformAdapter.edit_message:
-                while not progress_queue.empty():
-                    try:
-                        progress_queue.get_nowait()
-                    except Exception:
-                        break
+                _no_edit_notified = False
+                try:
+                    while True:
+                        if not _run_still_current():
+                            while not progress_queue.empty():
+                                try:
+                                    progress_queue.get_nowait()
+                                except Exception:
+                                    break
+                            return
+                        try:
+                            raw = progress_queue.get_nowait()
+                        except queue.Empty:
+                            await asyncio.sleep(0.3)
+                            continue
+                        # Skip special control messages (__dedup__, __reset__)
+                        if isinstance(raw, tuple):
+                            continue
+                        # Send a single notification on the first tool call only
+                        if not _no_edit_notified:
+                            _no_edit_notified = True
+                            try:
+                                await adapter.send(
+                                    chat_id=source.chat_id,
+                                    content=f"⚙️ {raw}",
+                                    metadata=_progress_metadata,
+                                )
+                            except Exception as _send_err:
+                                logger.debug("progress notify send failed: %s", _send_err)
+                except asyncio.CancelledError:
+                    # Drain remaining queue on cancellation
+                    while not progress_queue.empty():
+                        try:
+                            progress_queue.get_nowait()
+                        except Exception:
+                            break
                 return
 
             progress_lines = []      # Accumulated tool lines

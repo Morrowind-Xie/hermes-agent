@@ -4,6 +4,51 @@
 
 ---
 
+## 2026-05-02: 微信工具调用进度通知
+
+### 背景
+
+TUI takeover 模式下，微信用户发出需要工具调用的任务（如抓取新闻）后，TUI 中能看到工具运行的动画，但微信端陷入长时间无反馈状态，用户无法得知后台是否在运行。
+
+### 根本原因
+
+双重问题：
+
+1. **TUI takeover 路径**（主路径）：消息由 TUI 的 AI 处理，`_on_tool_progress` 回调只更新 TUI spinner，没有向微信发任何通知。
+
+2. **Gateway 直接处理路径**（非 takeover）：`send_progress_messages()` 中第 10913 行判断 `edit_message` 未重写（微信不支持编辑消息）→ 静默丢弃所有进度事件。
+
+### 修复方案
+
+**cli.py：`_on_tool_progress` 加 bridge 进度通知**
+
+```python
+# tool.started 分支末尾
+if self._bridge_platform and self._bridge_chat_id and not self._bridge_progress_notified:
+    self._bridge_progress_notified = True
+    self._bridge_send(f"⚙️ {emoji} {label}...")
+```
+
+- `_bridge_progress_notified` 标志：每轮新消息注入时重置为 `False`，第一个工具触发时置 `True` 并发通知，后续工具静默——避免刷屏。
+- 新增实例变量 `self._bridge_progress_notified: bool = False`。
+
+**gateway/run.py：`send_progress_messages()` 不再静默丢弃**
+
+对不支持 `edit_message` 的平台（原来直接 `return` 丢弃），改为：
+- 监听 `progress_queue`，第一个工具事件时发一条 `⚙️ 工具名...`
+- 后续工具静默（不再发新消息）
+- 响应 `CancelledError` 干净退出并清空队列
+
+### 效果
+
+| 场景 | 微信用户看到 |
+|------|------------|
+| 工具调用第 1 个 | `⚙️ 🔍 搜索新闻...`（1 条） |
+| 后续工具 | 静默（不刷屏） |
+| AI 回复到达 | 正常回复消息 |
+
+---
+
 ## 2026-05-01: 微信↔TUI 真正共享 Session（TUI 接管模式）【已验证】
 
 ### 背景
