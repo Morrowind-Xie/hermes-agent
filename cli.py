@@ -2218,6 +2218,7 @@ class HermesCLI:
         # Set via /bridge <platform> <chat_id>, cleared via /bridge off.
         self._bridge_platform: Optional[str] = None
         self._bridge_chat_id: Optional[str] = None
+        self._bridge_inbox_stop: Optional["threading.Event"] = None  # signals inbox watcher to stop
 
     # ------------------------------------------------------------------
     # Bridge: mirror TUI conversations to a messaging-platform session
@@ -2228,7 +2229,7 @@ class HermesCLI:
         return get_hermes_home() / "bridge_subscription.json"
 
     def _bridge_attach(self, platform: str, chat_id: str) -> None:
-        """Activate bridge and persist subscription."""
+        """Activate bridge, persist subscription, and start inbox watcher."""
         import json as _json
         self._bridge_platform = platform.strip().lower()
         self._bridge_chat_id = chat_id.strip()
@@ -2240,17 +2241,87 @@ class HermesCLI:
             )
         except Exception as _e:
             logger.debug("bridge: failed to persist subscription: %s", _e)
+        self._bridge_start_inbox_watcher()
 
     def _bridge_detach(self) -> None:
-        """Deactivate bridge and remove subscription file."""
+        """Deactivate bridge, remove subscription file, and stop inbox watcher."""
         self._bridge_platform = None
         self._bridge_chat_id = None
+        if self._bridge_inbox_stop is not None:
+            self._bridge_inbox_stop.set()
+            self._bridge_inbox_stop = None
         try:
             sub_path = self._bridge_subscription_path()
             if sub_path.exists():
                 sub_path.unlink()
         except Exception as _e:
             logger.debug("bridge: failed to remove subscription: %s", _e)
+        # Remove inbox file so old entries don't replay next time
+        try:
+            _inbox = get_hermes_home() / "bridge_inbox.jsonl"
+            if _inbox.exists():
+                _inbox.unlink()
+        except Exception:
+            pass
+
+    def _bridge_start_inbox_watcher(self) -> None:
+        """Start background thread that polls bridge_inbox.jsonl and displays notifications."""
+        import threading as _threading
+        # Stop any existing watcher first
+        if self._bridge_inbox_stop is not None:
+            self._bridge_inbox_stop.set()
+        stop_event = _threading.Event()
+        self._bridge_inbox_stop = stop_event
+
+        def _watch() -> None:
+            import json as _json
+            import time as _time
+            _inbox = get_hermes_home() / "bridge_inbox.jsonl"
+            # Truncate any pre-existing inbox so we start fresh
+            try:
+                if _inbox.exists():
+                    _inbox.write_text("", encoding="utf-8")
+            except Exception:
+                pass
+            _pos = 0
+            while not stop_event.is_set():
+                try:
+                    if _inbox.exists():
+                        with _inbox.open("r", encoding="utf-8") as _f:
+                            _f.seek(_pos)
+                            for _line in _f:
+                                _line = _line.strip()
+                                if not _line:
+                                    continue
+                                try:
+                                    _entry = _json.loads(_line)
+                                    _plat = _entry.get("platform", "")
+                                    _cid = _entry.get("chat_id", "")
+                                    _user = _entry.get("user_msg", "").strip()
+                                    _resp = _entry.get("response", "").strip()
+                                    # Only show messages from the bridged chat
+                                    if (
+                                        _plat == self._bridge_platform
+                                        and _cid == self._bridge_chat_id
+                                        and (_user or _resp)
+                                    ):
+                                        if _user:
+                                            self._console_print(
+                                                f"\n[bold cyan][{_plat}][/] 用户：{_user}"
+                                            )
+                                        if _resp:
+                                            self._console_print(
+                                                f"[bold cyan][{_plat}][/] Hermes：{_resp}"
+                                            )
+                                except Exception:
+                                    pass
+                            _pos = _f.tell()
+                except Exception:
+                    pass
+                stop_event.wait(timeout=2.0)
+
+        _t = _threading.Thread(target=_watch, daemon=True, name="bridge-inbox-watcher")
+        _t.start()
 
     def _bridge_send(self, text: str) -> None:
         """Send *text* to the currently bridged platform chat (fire-and-forget)."""
@@ -9808,6 +9879,7 @@ class HermesCLI:
                     f"  [dim]Bridge auto-restored → {self._bridge_platform}:{self._bridge_chat_id} "
                     f"(use /bridge off to detach)[/dim]"
                 )
+                self._bridge_start_inbox_watcher()
         except Exception:
             pass  # non-critical, never block startup
 

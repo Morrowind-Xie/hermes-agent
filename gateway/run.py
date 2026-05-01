@@ -5539,7 +5539,27 @@ class GatewayRunner:
                 **hook_ctx,
                 "response": (response or "")[:500],
             })
-            
+
+            # Bridge inbox: write completed exchange to bridge_inbox.jsonl so that
+            # a running TUI CLI can display a notification for this gateway message.
+            try:
+                from hermes_constants import get_hermes_home as _ghh
+                import json as _json
+                import time as _time
+                _inbox = _ghh() / "bridge_inbox.jsonl"
+                if _inbox.exists() or (_ghh() / "bridge_subscription.json").exists():
+                    _entry = {
+                        "ts": _time.time(),
+                        "platform": source.platform.value if source.platform else "",
+                        "chat_id": source.chat_id or "",
+                        "user_msg": message_text,
+                        "response": response or "",
+                    }
+                    with _inbox.open("a", encoding="utf-8") as _f:
+                        _f.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+            except Exception as _bridge_err:
+                logger.debug("bridge inbox write error: %s", _bridge_err)
+
             # Check for pending process watchers (check_interval on background processes)
             try:
                 from tools.process_registry import process_registry
