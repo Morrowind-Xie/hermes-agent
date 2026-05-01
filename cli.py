@@ -2299,20 +2299,33 @@ class HermesCLI:
                                     _cid = _entry.get("chat_id", "")
                                     _user = _entry.get("user_msg", "").strip()
                                     _resp = _entry.get("response", "").strip()
-                                    # Only show messages from the bridged chat
+                                    _takeover = _entry.get("tui_takeover", False)
+                                    # Only handle messages from the bridged chat
                                     if (
                                         _plat == self._bridge_platform
                                         and _cid == self._bridge_chat_id
                                         and (_user or _resp)
                                     ):
-                                        if _user:
+                                        if _takeover and _user:
+                                            # TUI takeover mode: inject into AI loop
+                                            # The AI reply will be bridge_send back to WeChat
                                             self._console_print(
-                                                f"\n[bold cyan][{_plat}][/] 用户：{_user}"
+                                                f"\n[bold cyan][{_plat} → TUI][/] {_user}"
                                             )
-                                        if _resp:
-                                            self._console_print(
-                                                f"[bold cyan][{_plat}][/] Hermes：{_resp}"
-                                            )
+                                            if hasattr(self, '_pending_input'):
+                                                self._pending_input.put(
+                                                    f"[来自微信的消息] {_user}"
+                                                )
+                                        else:
+                                            # Notification-only mode (gateway handled it)
+                                            if _user:
+                                                self._console_print(
+                                                    f"\n[bold cyan][{_plat}][/] 用户：{_user}"
+                                                )
+                                            if _resp:
+                                                self._console_print(
+                                                    f"[bold cyan][{_plat}][/] Hermes：{_resp}"
+                                                )
                                 except Exception:
                                     pass
                             _pos = _f.tell()
@@ -9363,9 +9376,15 @@ class HermesCLI:
                             _user_text = (_user_text + " [含图片]").strip()
                     else:
                         _user_text = ""
-                    if _user_text:
-                        self._bridge_send(f"[TUI] 你：{_user_text}")
-                    self._bridge_send(f"[TUI] Hermes：{response}")
+                    # TUI takeover mode: message originated from WeChat.
+                    # Only send the AI reply (no user echo, no [TUI] prefix).
+                    _from_weixin = _user_text.startswith("[来自微信的消息]")
+                    if _from_weixin:
+                        self._bridge_send(response)
+                    else:
+                        if _user_text:
+                            self._bridge_send(f"[TUI] 你：{_user_text}")
+                        self._bridge_send(f"[TUI] Hermes：{response}")
                 except Exception as _be:
                     logger.debug("bridge forward error: %s", _be)
 

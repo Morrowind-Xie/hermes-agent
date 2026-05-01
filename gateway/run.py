@@ -4840,6 +4840,60 @@ class GatewayRunner:
             source.chat_id or "unknown", _msg_preview,
         )
 
+        # TUI bridge takeover: if a TUI bridge subscription is active for this
+        # platform + chat_id, write the message to bridge_inbox.jsonl and return
+        # immediately so that the TUI handles the AI response (avoiding double replies).
+        try:
+            import json as _json_bridge
+            from hermes_constants import get_hermes_home as _ghh_bridge
+            import time as _time_bridge
+            _sub_path = _ghh_bridge() / "bridge_subscription.json"
+            _inbox_path = _ghh_bridge() / "bridge_inbox.jsonl"
+            _tui_takeover = False
+            if _sub_path.exists():
+                try:
+                    _sub = _json_bridge.loads(_sub_path.read_text(encoding="utf-8"))
+                    _sub_plat = str(_sub.get("platform") or "").strip().lower()
+                    _sub_cid = str(_sub.get("chat_id") or "").strip()
+                    if _sub_plat == _platform_name.lower() and _sub_cid == (source.chat_id or ""):
+                        _tui_takeover = True
+                except Exception:
+                    pass
+            if not _tui_takeover:
+                # Also check config.yaml bridge: section
+                try:
+                    import yaml as _yaml_bridge
+                    _cfg_path = _ghh_bridge() / "config.yaml"
+                    if _cfg_path.exists():
+                        _cfg_b = _yaml_bridge.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                        _br = _cfg_b.get("bridge", {})
+                        if isinstance(_br, dict):
+                            _br_plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                            _br_cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                            if _br_plat == _platform_name.lower() and _br_cid == (source.chat_id or ""):
+                                _tui_takeover = True
+                except Exception:
+                    pass
+            if _tui_takeover and event.text:
+                # Write to inbox so TUI picks it up and runs the AI + sends reply back
+                _entry = {
+                    "ts": _time_bridge.time(),
+                    "platform": _platform_name,
+                    "chat_id": source.chat_id or "",
+                    "user_msg": event.text,
+                    "response": "",  # TUI will generate the response
+                    "tui_takeover": True,
+                }
+                with _inbox_path.open("a", encoding="utf-8") as _f:
+                    _f.write(_json_bridge.dumps(_entry, ensure_ascii=False) + "\n")
+                logger.info(
+                    "[Gateway] TUI bridge takeover: forwarded message from %s to TUI inbox (skipping gateway AI)",
+                    source.chat_id or "unknown",
+                )
+                return None
+        except Exception as _bridge_check_err:
+            logger.debug("bridge takeover check failed (non-fatal): %s", _bridge_check_err)
+
         # Get or create session
         session_entry = self.session_store.get_or_create_session(source)
         session_key = session_entry.session_key

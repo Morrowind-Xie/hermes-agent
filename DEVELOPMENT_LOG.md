@@ -4,7 +4,81 @@
 
 ---
 
-## 2026-05-01: 微信→TUI 双向同步实现
+## 2026-05-01: 微信↔TUI 真正共享 Session（TUI 接管模式）【已验证】
+
+### 背景
+
+之前的"双向同步"实现（bridge_inbox）只是把微信消息**通知**给 TUI，但 gateway 的 AI 仍然独立处理微信消息并回复。用户希望微信和 TUI **共享同一个 AI 对话**：无论从哪端发消息，AI 都在同一个 session 里处理，两端同步所有信息。
+
+### 根本原因分析
+
+旧架构中微信消息走两条独立的处理链：
+1. Gateway AI（独立处理+回复微信）
+2. Bridge inbox（仅通知 TUI，不处理）
+
+用户感受：微信能看到 TUI 的内容（因为 `_bridge_send` 推送），但 TUI 无法处理微信的内容（inbox watcher 只显示通知，不注入 AI）。
+
+### 修复方案
+
+**架构：TUI 接管模式**
+
+```
+微信用户发消息
+    ↓
+gateway/run.py: 检测 bridge_subscription.json 或 config.yaml bridge: 是否匹配
+    ↓ 匹配（TUI takeover）
+写 bridge_inbox.jsonl（tui_takeover: True），直接返回，不运行 gateway AI
+    ↓
+cli.py inbox watcher: 检测到 tui_takeover=True 条目
+    ↓
+注入 _pending_input（`[来自微信的消息] xxx`）
+    ↓
+TUI 的 AI 处理，生成回复
+    ↓
+bridge_send 把回复发回微信（不带 [TUI] 前缀）
+```
+
+**gateway/run.py 修改**（`_handle_message_with_agent` 开头）：
+```python
+# 检查 bridge_subscription.json 或 config.yaml bridge: 是否与当前 platform+chat_id 匹配
+if _tui_takeover and event.text:
+    # 写 inbox（tui_takeover=True），直接 return None，跳过 gateway AI
+```
+
+**cli.py 修改**（inbox watcher）：
+```python
+_takeover = _entry.get("tui_takeover", False)
+if _takeover and _user:
+    self._console_print(f"\n[bold cyan][{_plat} → TUI][/] {_user}")
+    self._pending_input.put(f"[来自微信的消息] {_user}")
+```
+
+**cli.py 修改**（bridge_send 逻辑）：
+```python
+_from_weixin = _user_text.startswith("[来自微信的消息]")
+if _from_weixin:
+    self._bridge_send(response)  # 只发 AI 回复，不发用户消息回显
+else:
+    self._bridge_send(f"[TUI] 你：{_user_text}")
+    self._bridge_send(f"[TUI] Hermes：{response}")
+```
+
+### 效果
+
+| 场景 | 微信 | TUI |
+|------|------|-----|
+| 微信发消息 | 看到 AI 回复 | 看到 `[weixin → TUI] 消息` + AI 处理过程 |
+| TUI 发消息 | 看到 `[TUI] 你：xxx` + `[TUI] Hermes：yyy` | 正常显示 |
+
+### 注意事项
+
+- TUI 接管模式要求 bridge 已激活（`/bridge weixin <chat_id>` 或 config.yaml bridge: 配置）
+- Gateway 的微信平台仍需运行（负责 long-poll 收消息），但不再运行 AI
+- 微信的 `/reset`、`/stop` 等命令仍由 gateway 处理（不触发 AI，走命令路径）
+
+---
+
+
 
 ### 背景
 
