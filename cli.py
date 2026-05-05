@@ -3309,6 +3309,28 @@ class HermesCLI:
         """Return path to the bridge subscription file (persists across restarts)."""
         return get_hermes_home() / "bridge_subscription.json"
 
+    def _bridge_heartbeat_path(self) -> "Path":
+        """Return path to the bridge heartbeat file (TUI liveness signal for gateway)."""
+        return get_hermes_home() / "bridge_heartbeat.json"
+
+    def _bridge_write_heartbeat(self) -> None:
+        """Write/refresh the heartbeat file so gateway knows TUI is alive."""
+        import json as _json
+        import time as _time
+        import os as _os
+        try:
+            self._bridge_heartbeat_path().write_text(
+                _json.dumps({
+                    "platform": self._bridge_platform or "",
+                    "chat_id": self._bridge_chat_id or "",
+                    "last_seen": _time.time(),
+                    "pid": _os.getpid(),
+                }),
+                encoding="utf-8",
+            )
+        except Exception as _e:
+            logger.debug("bridge: failed to write heartbeat: %s", _e)
+
     def _bridge_attach(self, platform: str, chat_id: str) -> None:
         """Activate bridge, persist subscription, and start inbox watcher."""
         import json as _json
@@ -3322,6 +3344,9 @@ class HermesCLI:
             )
         except Exception as _e:
             logger.debug("bridge: failed to persist subscription: %s", _e)
+        # Write initial heartbeat immediately so gateway doesn't see a stale-or-missing
+        # heartbeat during the brief window before the watcher thread starts.
+        self._bridge_write_heartbeat()
         self._bridge_start_inbox_watcher()
 
     def _bridge_detach(self) -> None:
@@ -3337,6 +3362,14 @@ class HermesCLI:
                 sub_path.unlink()
         except Exception as _e:
             logger.debug("bridge: failed to remove subscription: %s", _e)
+        # Remove heartbeat file immediately so gateway stops takeover without waiting
+        # for the 10-second timeout.
+        try:
+            hb_path = self._bridge_heartbeat_path()
+            if hb_path.exists():
+                hb_path.unlink()
+        except Exception as _e:
+            logger.debug("bridge: failed to remove heartbeat: %s", _e)
         # Remove inbox file so old entries don't replay next time
         try:
             _inbox = get_hermes_home() / "bridge_inbox.jsonl"
@@ -3415,6 +3448,8 @@ class HermesCLI:
                             _pos = _f.tell()
                 except Exception:
                     pass
+                # Refresh heartbeat so gateway knows TUI is still alive
+                self._bridge_write_heartbeat()
                 stop_event.wait(timeout=2.0)
 
         _t = _threading.Thread(target=_watch, daemon=True, name="bridge-inbox-watcher")
