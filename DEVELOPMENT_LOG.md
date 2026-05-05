@@ -4,6 +4,105 @@
 
 ---
 
+## 2026-05-03: TUI Bridge 心跳机制——TUI 离线时自动降级到 gateway 直接处理
+
+### 背景
+
+原有 TUI Bridge Takeover 逻辑只检查 `bridge_subscription.json` 或 `config.yaml` 的静态配置，不感知 TUI 是否真的在运行。TUI 不启动时，微信消息会被写入 `bridge_inbox.jsonl` 后无人处理，导致消息静默丢失。
+
+### 功能目标
+
+- **TUI 在线**：保持 takeover（微信消息 → TUI AI 处理 → 回复）
+- **TUI 离线**：gateway 自动降级，用自己的 AI session 直接处理微信消息，不丢消息
+- **TUI 重启后**：无需任何手动操作，自动切回 takeover 模式
+
+### 实现方案
+
+引入心跳文件 `~/.hermes/bridge_heartbeat.json` 作为 TUI 存活信号：
+
+```json
+{
+  "platform": "weixin",
+  "chat_id": "xxx",
+  "last_seen": 1746270000.123,
+  "pid": 12345
+}
+```
+
+**TUI 侧（`cli.py`）**：
+
+1. 新增 `_bridge_heartbeat_path()`、`_bridge_write_heartbeat()` 辅助方法
+2. `_bridge_attach()` 启动时立即写入初始心跳（避免第一条消息因心跳未就绪被错误降级）
+3. `_bridge_start_inbox_watcher()` 的 `_watch()` 循环末尾（每 2 秒）调用 `_bridge_write_heartbeat()` 刷新
+4. `_bridge_detach()`（`/bridge off` 或 TUI 正常退出）主动删除心跳文件，gateway 立即降级
+
+**Gateway 侧（`gateway/run.py`）**：
+
+在 `_tui_takeover = True` 成立后增加心跳有效性检查：
+```python
+_hb_age = time.time() - float(_hb.get("last_seen", 0))
+_tui_alive = _hb_age < 10.0  # 10秒超时 = 允许5次心跳丢失
+if not _tui_alive:
+    _tui_takeover = False  # 降级到 gateway 直接处理
+```
+
+### 改动文件
+
+| 文件 | 改动 |
+|------|------|
+| `cli.py` | 新增 `_bridge_heartbeat_path()`、`_bridge_write_heartbeat()`；`_bridge_attach/detach/_watch` 三处添加心跳逻辑 |
+| `gateway/run.py` | takeover 判断段增加心跳有效性检查，过期时降级并记录 INFO 日志 |
+
+### 边界情况
+
+| 场景 | 结果 |
+|------|------|
+| TUI 正常退出 | `_bridge_detach()` 主动删心跳，gateway 立即降级（无需等 10 秒） |
+| TUI 崩溃 | 心跳停止，10 秒后 gateway 自动降级 |
+| TUI 重启 | 心跳恢复，下一条消息自动切回 takeover |
+| 心跳文件读取异常 | fall through 到降级处理，消息不丢失 |
+
+---
+
+## 2026-05-02: hermes dashboard 端口 9119 被 iCloud 占用
+
+### 症状
+
+执行 `hermes dashboard` 报错：
+```
+ERROR: [Errno 98] error while attempting to bind on address ('127.0.0.1', 9119): address already in use
+```
+
+WSL 内 `/proc/net/tcp` 和 `/proc/net/tcp6` 均看不到 9119 的监听记录，`ss`/`lsof` 也无结果，但 Python `socket.bind()` 确实失败。
+
+### 根本原因
+
+Windows 侧 `iCloudCKKS.exe`（PID 4356）持有 9119 端口，状态为 `CLOSE_WAIT`（连接未正常关闭的残留）。WSL2 与 Windows 共享网络栈，Windows 侧占用的端口在 Linux `/proc/net` 中不可见，但 bind 会失败。
+
+验证命令（Windows PowerShell）：
+```powershell
+netstat -ano | findstr :9119
+# 输出：TCP  192.168.10.102:9119  17.248.216.65:443  CLOSE_WAIT  4356
+tasklist /FI "PID eq 4356"
+# 输出：iCloudCKKS.exe
+```
+
+### 解决方案
+
+Windows PowerShell（管理员）执行：
+```powershell
+taskkill /PID 4356 /F
+```
+
+iCloud 会自动重启并换用其他端口，9119 随即释放。回到 WSL 重新执行 `hermes dashboard` 即可。
+
+### 经验总结
+
+- WSL2 端口被占但 Linux 侧不可见 → 优先在 Windows 侧用 `netstat -ano | findstr :<port>` 排查
+- iCloud 偶发占用随机高端口（此次为 9119），CLOSE_WAIT 状态不会自动释放，需手动 kill
+
+---
+
 ## 2026-05-02: 微信工具调用进度通知【已验证】
 
 ### 背景
