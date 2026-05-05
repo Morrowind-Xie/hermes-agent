@@ -7924,6 +7924,27 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 except Exception:
                     pass
             if _tui_takeover and event.text:
+                # Verify TUI is actually running by checking the heartbeat file.
+                # The TUI bridge watcher refreshes bridge_heartbeat.json every 2 seconds.
+                # If last_seen is older than 10 seconds, TUI is offline → fall back to
+                # gateway AI so the message is not silently dropped.
+                _hb_path = _ghh_bridge() / "bridge_heartbeat.json"
+                _tui_alive = False
+                try:
+                    if _hb_path.exists():
+                        _hb = _json_bridge.loads(_hb_path.read_text(encoding="utf-8"))
+                        _hb_age = _time_bridge.time() - float(_hb.get("last_seen", 0))
+                        _tui_alive = _hb_age < 10.0
+                except Exception:
+                    pass
+                if not _tui_alive:
+                    logger.info(
+                        "[Gateway] TUI bridge takeover: TUI offline (heartbeat absent or stale), "
+                        "falling back to gateway AI for message from %s",
+                        source.chat_id or "unknown",
+                    )
+                    _tui_takeover = False
+            if _tui_takeover and event.text:
                 # Write to inbox so TUI picks it up and runs the AI + sends reply back
                 _entry = {
                     "ts": _time_bridge.time(),
