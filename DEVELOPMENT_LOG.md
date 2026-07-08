@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-08: 同步上游 origin/main → v2026.7.7.2-58-gadea139cd
+
+- 上游新增 124 commits，新 tag：`v2026.7.7`、`v2026.7.7.2`
+- 主要上游变更：delegation 生命周期修复（多处）、webhook payload filters、`tencent/hy3` GA 模型、yuanbao 并行媒体下载、cli/tui 命令路由修复
+- 冲突：`cli.py` 1 处（HEAD 缺少 `_exit_code` kanban 退出码逻辑 + `_print_exit_summary` 参数），保留上游版本
+- 18 个自定义提交全部 rebase 完成，fork push 成功（`fa9157302 → adea139cd`）
+
+---
+
 ## 2026-05-03: TUI Bridge 心跳机制——TUI 离线时自动降级到 gateway 直接处理
 
 ### 背景
