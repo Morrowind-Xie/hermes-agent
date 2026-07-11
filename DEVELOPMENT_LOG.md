@@ -4,6 +4,24 @@
 
 ---
 
+## 2026-07-11: 同步上游 origin/main → v2026.7.7.2-289-g96a6dbad3
+
+- 上游新增 41 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：desktop session/composer 修复、security tool output risk 暴露、cron heartbeat 修复、tui disconnect 保存修复、telegram PTB 错误分类、web extract 加固、agent pool FD 修复（后被 revert）
+- 无冲突，rebase 一次完成
+- 19 个自定义提交全部保留，fork push 成功（`f18a131f0 → 96a6dbad3`）
+
+---
+
+## 2026-07-10: 同步上游 origin/main → v2026.7.7.2-248-gf18a131f0
+
+- 上游新增 189 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：desktop 多项修复（Tip sticking、UI zoom、bootstrap repin）、gateway SessionStore 并发竞态修复（6 处）、model catalog policy 重构、web dashboard paste/drop 图片支持、soft gateway switch UX
+- 冲突：`cli.py` 1 处（自定义提交 `feat(bridge)` 错误删除上游 `_discard_session_if_empty` 和 `_launch_session_boundary_memory_flush`），保留 HEAD 版本
+- 19 个自定义提交全部 rebase 完成，fork push 成功（`adea139cd → f18a131f0`）
+
+---
+
 ## 2026-07-08: 同步上游 origin/main → v2026.7.7.2-58-gadea139cd
 
 - 上游新增 124 commits，新 tag：`v2026.7.7`、`v2026.7.7.2`
