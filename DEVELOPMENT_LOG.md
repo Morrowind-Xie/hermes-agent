@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-12: 同步上游 origin/main → v2026.7.7.2-349-g0512f4cd3
+
+- 上游新增 59 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：gateway `@` context reference 修复（AttributeError）、runtime context budget 支持、authenticated readiness checks；codex compaction 多处修复；compaction anti-thrash 逻辑修复（4 处）；agent per-model token usage 追踪；telemetry/insights usage attribution 加固；tui/desktop model picker session scope 修复
+- 无冲突，rebase 一次完成
+- 20 个自定义提交全部保留，fork push 成功（`982949e98 → 0512f4cd3`）
+
+---
+
 ## 2026-07-11: 同步上游 origin/main → v2026.7.7.2-289-g96a6dbad3
 
 - 上游新增 41 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
