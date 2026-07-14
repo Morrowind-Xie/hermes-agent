@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-14: 同步上游 origin/main → v2026.7.7.2-598-g41ced571b
+
+- 上游新增 248 commits（含 2026-07-13 未同步的 104 个），无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：desktop compaction status 修复、telegram 多处修复（polling health、DoH、reconnect probe）、background_review reasoning_config 继承修复、gateway session/compression 修复、cron 重复执行修复、file-safety 写入拒绝区分、agent credential pool 验证、cli npm install 性能优化、kanban/approval/dashboard 多处修复
+- 无冲突，rebase 一次完成
+- 21 个自定义提交全部保留，fork push 成功（`b36b5b44f → 41ced571b`）
+
+---
+
 ## 2026-07-12: 同步上游 origin/main → v2026.7.7.2-349-g0512f4cd3
 
 - 上游新增 59 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
