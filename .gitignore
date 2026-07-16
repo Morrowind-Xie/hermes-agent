@@ -219,3 +219,4 @@ native/fts5_cjk/*.so
 
 # IDE
 .codebuddy/
+.qoder/
