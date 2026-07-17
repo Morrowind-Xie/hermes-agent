@@ -4,6 +4,31 @@
 
 ---
 
+## 2026-07-16: 同步上游 origin/main → eb9d7e7f0
+
+- 上游新增 125 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：gateway multiplex relay adapter 共享修复、CI js-autofix 改用 PR 推送 + lockfile diff 评论工作流、Nix dirty-tree wrapper bug 修复、TUI dashboard 新 session redraw 修复、desktop pane-shell 重构（tree/grid 架构）、contrib 插件系统（desktop SDK + plugin runtime）、JS 测试从 Python 迁移到 vitest、web MCP server 创建 + profile builder MCP auth、blender MCP skill
+- **无冲突**，merge 一次完成（402 files changed, +28830/-6691）
+- 额外提交：`.gitignore` 添加 `.qoder/` 忽略规则
+- fork push 成功（`e3effccd2 → eb9d7e7f0`）
+
+---
+
+## 2026-07-15: 同步上游 origin/main → e3effccd2
+
+- 上游新增 108 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：codex continuation/reasoning 多处修复、desktop @assistant-ui 0.12→0.14 升级（streaming wrapper、remend-tail、math delimiter 重构）、GLM-5.2 模型目录支持、provider profile 感知推理参数系统（`build_extra_body` / `build_api_kwargs_extras`）、非字符串 tool args TypeError 防护（ACP + display）、moa aggregator reasoning 修复、upstage provider 插件
+- **同步方式改为 merge**（此前一直用 rebase），避免 rebase 后 fork 独有 commits 需要反复重放
+- **冲突 1 处**：`agent/auxiliary_client.py` — fork 的 DeepSeek `reasoning_content` 字段清理逻辑 vs 上游新增的 provider profile 感知推理参数系统
+  - fork 侧：发送前过滤 assistant 消息的 `reasoning_content` 字段（防止非 DeepSeek auxiliary provider 返回 HTTP 400）
+  - 上游侧：`get_provider_profile()` + `build_extra_body()` + `build_api_kwargs_extras()` 构建 provider-specific 推理参数
+  - **解决方案**：两者功能独立，同时保留——先执行 message cleaning，再执行 profile 推理参数构建
+- 22 个 fork 独有 commits 全部保留
+- 额外：`.gitignore` 新增 `.qoder/`（IDE 生成缓存，不纳入版本控制）
+- fork push 成功（`e8cbc75da → e3effccd2`）
+
+---
+
 ## 2026-07-14: 同步上游 origin/main → v2026.7.7.2-598-g41ced571b
 
 - 上游新增 248 commits（含 2026-07-13 未同步的 104 个），无新 stable tag（最新仍 `v2026.7.7.2`）
