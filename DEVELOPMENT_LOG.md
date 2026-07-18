@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-07-17: 同步上游 origin/main → 077192af8
+
+- 上游新增 311 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
+- 主要上游变更：cron execution ledger（truthful execution ledger + attempt ledger 加固）、Z.AI GLM token-limit 分类为 context overflow、MCP nextCursor 分页支持、memory 关闭时排空 queued writes、SQLite snapshot fail closed、session transcripts 保护（inspired by Claude Code）、Gemini tool schema 属性修剪、CLI `/resume recap` 终端转义清理、UTF-8 BOM 剥离、gateway reset boundaries 统一、TUI compute_host + host_supervisor + synthetic_turn、MCP dashboard OAuth、Unreal MCP skill、aux_accounting、codex_runtime 大幅重构
+- **无冲突**，merge 一次完成（496 files changed, +39938/-5141）
+- fork push 成功（`eb9d7e7f0 → 077192af8`）
+
+---
+
 ## 2026-07-16: 同步上游 origin/main → eb9d7e7f0
 
 - 上游新增 125 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
