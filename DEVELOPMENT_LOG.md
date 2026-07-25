@@ -4,6 +4,16 @@
 
 ---
 
+## 2026-07-18: 同步上游 origin/main → 24c465d01
+
+- 上游新增 79 commits，无新 stable tag
+- 主要上游变更：model picker 显示耗尽的 pool providers、CLI TUI Python env 传递、desktop LaTeX 保留 + Windows 系统 CA 信任 + Providers API-keys tab 暴露 Local/custom、codex cache-scope headers 64 字符上限 + app-server 事件流、cron POSIX 解码默认保留 + Windows launcher 弹窗修复、kanban unblock 状态与 DB 同步、mem0 OSS base URL 别名迁移、honcho timeout 从 honcho.json 读取、CI 负载下稳定 + fork-safe token fallback、block list 内容无限循环修复、contrib 贡献者自动化脚本
+- **无冲突**，merge 一次完成（208 files changed, +8883/-1365）
+- 新增模块：`agent/stream_single_writer.py`（单写流保护）、`apps/desktop/electron/windows-system-ca.ts`（Windows 系统 CA 信任）、`contributors/`（贡献者归属系统）
+- fork push 成功（`077192af8 → 24c465d01`）
+
+---
+
 ## 2026-07-17: 同步上游 origin/main → 077192af8
 
 - 上游新增 311 commits，无新 stable tag（最新仍 `v2026.7.7.2`）
