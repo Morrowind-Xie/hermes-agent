@@ -4,6 +4,20 @@
 
 ---
 
+## 2026-07-25: 同步上游 origin/main → 4ab7d5b07（新 tag v2026.7.20，重度冲突解决）
+
+- 上游新增 1684 commits，**新 stable tag `v2026.7.20`**（2310 files, +302822/-29819）
+- 主要上游变更：Windows UTF-8 大扫除（全仓 read_text/write_text 补 encoding）、Telegram 冷启动 polling readiness 加固、checkpoints 孤儿卷分类需正向证据、desktop display_metadata 双重编码修复 + `/api/health` 存活端点、cli.py 大规模瘦身（`_init_agent`/`_ensure_runtime_credentials`/`_preload_resumed_session` → `CLIAgentSetupMixin`，billing 方法群 → `CLIBillingMixin`，`/credits`+`/billing` 折叠进 `/topup`）、模型切换昂贵模型确认流程、active-session lease 机制（`_claim_active_session`）
+- **3 处冲突**：
+  1. `.gitignore`：双方追加内容 → 两侧都保留
+  2. `acp_registry/agent.json`：上游 #68217 有意删除（rip out brew+pip 支持），fork 侧仅格式化差异 → 接受删除
+  3. `cli.py`：7 处冲突区。发现 fork 早期 rebase 恢复引入了过期 cli.py 副本（缺上游 `_claim_active_session`/`_persist_prompt_summary` 等新方法），逐块解决会残留隐患 → **改用干净重建策略**：以上游 cli.py 为基底，重新移植 fork 的 6 个 bridge 定制块（bridge state、bridge 方法群、`/bridge` dispatch、工具进度通知、对话镜像同步、启动 auto-restore），最终 diff 只含纯插入
+- 验证：py_compile 通过、bridge + 上游新方法共存断言通过、tests/cli/ 1136 passed、tests/gateway/ 301 passed（2 个失败项在纯上游 worktree 同样复现，为上游自身 flaky，与合并无关）
+- fork push 成功（`24c465d01 → 4ab7d5b07`）
+- ⚠️ 经验：fork 的 rebase 恢复型 commit（如 a7515ccce）可能夹带过期的上游代码副本，后续同步时应优先"上游为基底+移植定制"而非逐块解决冲突
+
+---
+
 ## 2026-07-18: 同步上游 origin/main → 24c465d01
 
 - 上游新增 79 commits，无新 stable tag
