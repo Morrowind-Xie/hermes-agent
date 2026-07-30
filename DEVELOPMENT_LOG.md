@@ -4,6 +4,17 @@
 
 ---
 
+## 2026-07-30: 同步上游 origin/main → 386409230
+
+- 上游新增 1419 commits，无新 stable tag（最新仍 `v2026.7.20`）
+- 主要上游变更：cron BaseException 逃逸记录 + wedged one-shots 诊断、gateway session teardown 前 flush 待写 memory、models.dev 刷新移出事件循环、STT 语音转文字全面可配置（hermes tools + GUI + dashboard 下拉框 + faster-whisper 静音幻觉修复）、LSP 空闲 language server 回收（idle_timeout 可配置）、shutdown flush 失败保留 agent._session_messages、CLI import-agent 不再粉碎已有 MEMORY.md、atomic_write_text 提取到 utils、desktop backend probe 超时提升 + 重试、doctor agent-browser 检测 PATHEXT-aware
+- **1 处冲突**：`gateway/run.py` 的 `send_progress_messages`——fork 的「非编辑平台发送单条 ⚙️ 通知」行为 vs 上游的 `getattr` duck-typing 检测（上游对无 edit_message 的适配器更健壮）。**语义合并**：采用上游的 `_adapter_edit = getattr(...)` 检测方式，保留 fork 的单条通知循环逻辑
+- 验证：py_compile 通过、进度相关测试 12 passed（test_run_progress_interrupt / test_run_cleanup_progress / test_clarify_progress_leak）
+- 上次重建的 `cli.py` 本次自动合并成功（干净重建策略持续生效）
+- fork push 成功（`4ab7d5b07 → 386409230`）
+
+---
+
 ## 2026-07-25: 同步上游 origin/main → 4ab7d5b07（新 tag v2026.7.20，重度冲突解决）
 
 - 上游新增 1684 commits，**新 stable tag `v2026.7.20`**（2310 files, +302822/-29819）
