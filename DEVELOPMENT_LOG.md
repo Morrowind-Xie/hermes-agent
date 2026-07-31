@@ -4,6 +4,19 @@
 
 ---
 
+## 2026-07-30: 同步上游 origin/main → ccf1e2936d（核心文件大重构）
+
+- 上游新增 371 commits，无新 stable tag（最新仍 `v2026.7.20`）
+- 主要上游变更：desktop 性能优化（⌘K 命令面板延迟加载、transcript live tail 分段预算、composer 粘贴指令 chip 化、File>Open Folder ⌘O 项目）、TUI 终端 tab 标题与窗口标题分离、gateway 保留 text 输入 voice_only 语义、Windows 原生修正（CLI/gateway status/banner/WSL 浏览器路径）、**核心文件大重构**（gateway/run.py 的 send_progress_messages 提取到 TurnRunner 类、hermes_cli/main.py、tui_gateway/server.py、hermes_state.py 等整体重写，净删除 43 万行含测试瘦身）
+- **2 处冲突**：
+  1. `.gitignore`：双方追加 → 两侧都保留（fork 的 .tmp/ + 上游的 .lazy-refresh-incomplete）
+  2. `gateway/run.py`：上游将 `send_progress_messages` 从闭包重构为 `TurnRunner` 类方法。fork 的「非编辑平台单条 ⚙️ 通知」定制需适配新结构——**移植到新方法**，变量映射 progress_queue→ctx.progress_queue、source→ctx.source、_progress_metadata→ctx._progress_metadata、_run_still_current()→ctx._run_still_current()
+- 验证：py_compile 通过、gateway.run import OK、进度测试 7 passed、最终 diff 只含 4 处 bridge 纯插入（TUI takeover + inbox write + 单条通知）无意外删除
+- 额外：.gitignore 添加 `.tmp/`（避免误提交测试日志）
+- fork push 成功（`386409230 → ccf1e2936d`）
+
+---
+
 ## 2026-07-30: 同步上游 origin/main → 386409230
 
 - 上游新增 1419 commits，无新 stable tag（最新仍 `v2026.7.20`）
