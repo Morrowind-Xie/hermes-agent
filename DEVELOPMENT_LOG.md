@@ -4,6 +4,15 @@
 
 ---
 
+## 2026-08-01: 同步上游 origin/main → b98a3a0fc7（零冲突）
+
+- 上游新增 157 commits，无新 stable tag（最新仍 `v2026.7.20`）（215 files, +14891/-3945）
+- 主要上游变更：agent 微压缩系列（micro-compaction 改 opt-in 非默认、节奏可配置、alternation-safe、会话恢复不破坏已压缩历史）、desktop OAuth 原生 token 存储加固（重启恢复、凭证脱敏）、dashboard 恢复会话加载遮罩 + JWKS headers 修复、Slack self-mention 路由修复、identity prompt 精简
+- **无冲突**，merge 一次完成；bridge 定制完好（gateway/run.py TUI takeover ×3、cli.py _bridge_attach ×2），py_compile 通过
+- fork push 成功（`ccf1e2936d → b98a3a0fc7`）
+
+---
+
 ## 2026-07-30: 同步上游 origin/main → ccf1e2936d（核心文件大重构）
 
 - 上游新增 371 commits，无新 stable tag（最新仍 `v2026.7.20`）
