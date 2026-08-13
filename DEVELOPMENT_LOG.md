@@ -1,3 +1,45 @@
+## 2026-08-11: 微信推送通道修复（iLink errcode=-14）+ session-bridge v2 完全同步
+
+### 症状
+
+push_wechat.py 推送 W33 投资周报到微信：HTTP 200 但用户实际收不到；多次测试（v2→v5）均无消息到达；微信侧长风与桌面侧长风对同一事实给出矛盾结论（"session 没死" vs "session 死了"），用户需要手动复制微信回复到桌面才能继续对话——**双入口认知不同步**。
+
+### 根本原因
+
+三个独立问题叠加：
+
+1. **iLink sendmessage 的 Authorization 头丢失**：push_wechat.py v3/v4 在修复 context_token 位置时，把 `Authorization: Bearer <WEIXIN_TOKEN>`（账号认证 token，从 .env 读）整个删掉了。iLink 返回 `errcode=-14 session timeout`，HTTP 200 只是"请求被接收"，不代表"消息已投递"。
+2. **token 双轨机制**：iLink 发送需要**两个 token 同时存在**——`Authorization` 头（账号认证，.env 的 WEIXIN_TOKEN）+ `msg.context_token`（用户会话，~/.hermes/weixin/accounts/*.context-tokens.json）。gateway 的 `_send_message()` 一直这么发，所以微信侧长风能回复用户；独立脚本少了 Authorization 就报 -14。
+3. **session-bridge 只做"摘要同步"不做"完整同步"**：桥文件 `_line()` 把每条消息截断到 200 字符（MSG_CAP=200），且只有 post_llm_call（写），没有 pre_llm_call（读/注入对端内容）。两边长风看到的都是对方的截断摘要，认知自然不一致。
+
+### 修复方案
+
+**push_wechat.py v5**（`~/My_Projects/invest/scripts/push_wechat.py`）：
+- Authorization（账号 token）+ msg.context_token（会话 token）双管齐下，完全对齐 gateway 的 `_send_message()` 调用方式
+- 检查 iLink 业务返回码 `ret`/`errcode`，不只看 HTTP 200
+- 自动 fallback：errcode=-14 时去 token 重试一次（对齐 gateway `_send_text_chunk_locked` 策略）
+- 实测：`ret=None, errcode=None` 不再报 -14，用户微信收到 ✅
+
+**session-bridge 插件 v2**（`~/.hermes/plugins/session_bridge/__init__.py`）：
+- 新增 `conversation_full.jsonl`：完整对话日志（不截断，上限 3000 字/条，双向写，5000 行自动裁剪）
+- 新增 **pre_llm_call 钩子**：每轮对话前自动读取对端最新完整对话，返回 `{"context": "..."}` 注入 user message（不破坏 system prompt 缓存）——两边长风每轮都"天生知道"对方聊了什么
+- 保留摘要桥文件（desktop_latest.md / wechat_latest.md）兼容旧逻辑
+- 重启 hermes-gateway.service 使插件生效（systemd user 服务）
+
+### 验证
+
+- 单测：desktop 写 FULL_LOG → weixin 侧 pre_llm_call 成功注入桌面内容（141 字符，含时间戳）✅
+- 端到端：push_wechat.py v5 推送测试消息到微信，用户确认收到 ✅
+- gateway 重启后新 PID 3089658，插件 v2 加载 ✅
+
+### 经验总结
+
+- **iLink 发送双 token 是硬约束**：`Authorization`（账号认证）+ `msg.context_token`（用户会话）缺一不可，独立脚本必须照抄 gateway 的 `_send_message()` payload 结构，不能自己发明。
+- **"收消息长连接"与"发消息 session"是两个独立通道**：getupdates alive ≠ sendmessage 有效。查微信通道故障时两条线都要查，微信侧长风查前者、桌面侧查后者，结论不矛盾只是角度不同。
+- **跨入口同步必须"完整内容 + 双向注入"**：摘要同步（截断 200 字）必然导致两边认知不一致。pre_llm_call 返回 `{"context": ...}` 注入 user message 是 Hermes 官方支持的跨端上下文注入方式，不破坏 prompt cache。
+
+---
+
 # Hermes Agent — 开发与调试记录
 
 > **时间线索**：最新的记录在最顶端，按时间倒序排列。
