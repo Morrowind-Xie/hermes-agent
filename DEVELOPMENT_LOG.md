@@ -1,3 +1,25 @@
+# Hermes Agent — 开发与调试记录
+
+> **时间线索**：最新的记录在最顶端，按时间倒序排列。
+
+---
+
+## 2026-09-01: 同步上游 origin/main → v2026.8.31-172-g6b7954b940
+
+- 上游新增 352 commits，新 stable tags：`v2026.8.16.2`、`v2026.8.18`、`v2026.8.19`、`v2026.8.27`、`v2026.8.31`
+- 主要上游变更：anthropic MCP wire normalization 重构、agent foreground resources 修复、terminal Linux systemd scope 修复、desktop/cli Chromium sandbox 修复、gemini call id/tool_call name 修复、cache declared conversation precedence + affinity token 修复（多处）、api declared conversation resolution 修复、compression preflight display-seed 修复
+- 冲突：7 个文件共 ~30 处冲突
+  - `acp_registry/agent.json`：上游删除，接受删除
+  - `.gitignore`：合并两边（上游新条目 + `.codebuddy/`）
+  - `agent/auxiliary_client.py`：合并两边（上游 provider profile reasoning 逻辑 + 自定义 reasoning_content strip）
+  - `cli.py`：23 处冲突，22 处保留 HEAD（上游新增代码），2 处合并（bridge 代码）
+  - `hermes_cli/commands.py`：1 处合并两边
+  - `gateway/run.py`：1 处保留 HEAD（上游将 send_progress_messages 提取到 TurnRunner）
+  - `package-lock.json`：保留上游版本
+- 31 个自定义提交全部 rebase 完成，fork push 成功（`7f4521f1bf → 6b7954b940`）
+
+---
+
 ## 2026-08-11: 微信推送通道修复（iLink errcode=-14）+ session-bridge v2 完全同步
 
 ### 症状
