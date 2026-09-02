@@ -485,6 +485,12 @@ def _(rid, params: dict) -> dict:
             include_unconfigured=bool(params.get("include_unconfigured")),
             refresh=bool(params.get("refresh")),
         )
+        # DEBUG: log bailian provider data
+        import json as _json, sys as _sys
+        _bailian = [p for p in payload.get("providers", []) if "bailian" in (p.get("name", "") + p.get("slug", "")).lower()]
+        if _bailian:
+            _dbg = _json.dumps([{"slug": p["slug"], "name": p.get("name",""), "models": p.get("models", []), "has_qwen38": "qwen3.8-max" in (p.get("models") or [])} for p in _bailian], ensure_ascii=False)
+            print(f"[model.options DEBUG] bailian providers: {_dbg}", file=_sys.stderr, flush=True)
         return _ok(rid, payload)
     except Exception as e:
         return _err(rid, 5033, str(e))
