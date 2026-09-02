@@ -4,6 +4,159 @@
 
 ---
 
+## 2026-09-01: Desktop 模型菜单缺失 qwen3.8-max（custom_providers 同名条目冲突）
+
+### 症状
+
+Desktop 的模型选择菜单中，`custom:bailian` 分组下**没有** `qwen3.8-max`，但同一份配置在 TUI 侧正常可见。`config.yaml` 中 `model.default` 明确配的就是 `qwen3.8-max`，Desktop 却选不到。
+
+### 排查过程
+
+1. **先验证服务端数据**：直连 gateway HTTP API（端口 8643）查询模型列表，返回结果**包含** `qwen3.8-max`。说明配置解析本身没问题，怀疑前端缓存。
+2. **排除前端缓存**：`location.reload()` 后重新打开菜单，仍无该模型。清 React Query 缓存无效。
+3. **抓 Desktop 实际链路**：在 DevTools 中取到 Desktop 使用的 WebSocket 地址
+
+   ```javascript
+   window.hermesDesktop.getGatewayWsUrl()
+   // → ws://127.0.0.1:45241/api/ws?token=...
+   ```
+
+   注意端口是 **45241**，不是 HTTP API 的 8643。
+4. **通过该 WS 直接发 RPC**（需先消费 `gateway.ready` 事件再发请求），拿到的 `model.options` 响应中 `custom:bailian` 的模型列表**确实没有** `qwen3.8-max` —— 与 HTTP API 结果不一致。
+5. **定位到两个不同进程**：
+
+   | 进程 | PID | 命令 | 端口 | 有 qwen3.8-max |
+   |---|---|---|---|---|
+   | gateway | 608176 | `gateway run` | 8643 | 有 |
+   | Desktop 后端 | 614126 | `hermes --profile invest serve` | 45241 | 无 |
+
+   两者读的是同一个 `config.yaml`，但解析结果不同。
+
+### 根本原因
+
+`custom_providers` 是一个 **list**，其中存在**两个 `name: bailian` 的重复条目**：
+
+| | 第一个（行 587） | 第二个（行 616） |
+|---|---|---|
+| `base_url` | `https://coding.dashscope.aliyuncs.com/v1` | `https://token-plan.cn-beijing.maas.aliyuncs.com/compatible-mode/v1` |
+| `api_key` | **空** | 有真实 key |
+| `models` | 10 个，**不含** `qwen3.8-max` | 12 个，**含** `qwen3.8-max` |
+| `models_discovered` | 无 | `true` |
+
+YAML list 允许同名条目共存，不会像 dict 那样报重复 key 错误，因此配置文件本身能正常加载。但下游消费方对"同名 provider"的处理策略不同：
+
+- `serve`（Desktop 后端）按 name 查找时**取首个匹配**，命中第一个 bailian（无 key、10 个模型）
+- `gateway` 会把两个条目**都加载**，因此 union 后能看到 `qwen3.8-max`
+
+`model.default: qwen3.8-max` + `model.provider: bailian` 本意指向第二个条目，Desktop 侧却解析到第一个，模型列表里自然没有它。第一个条目是早期 `coding.dashscope` endpoint 的废弃残留，`api_key` 为空，实际根本调不通。
+
+### 修复方案
+
+合并两个条目为一个，保留可用的 `token-plan` endpoint（真实 key + 12 个模型），删除重复的 `coding.dashscope` 残留条目。同时将 invest profile 的 `model.base_url` 同步为 `token-plan` 地址。
+
+### 验证结果
+
+```
+custom_providers type: list
+  name: bailian | base_url: https://token-plan.cn-beijing.maas.aliyuncs.com/... 
+                | key: SET | n_models: 12 | has qwen3.8-max: True
+```
+
+- 同名条目已消除，Desktop 与 gateway 解析结果一致
+- 确认 6 个 profile 的差异化载体未受影响：`SOUL.md`（各 1297~1445 bytes，均保持 7-31 时间戳）、`profile.yaml`（方向描述）、`memories/`、`sessions/`、`state.db`、`skills/`、`cron/` 全部未改动
+- 附带发现：6 个 profile 的 `config.yaml` 中 `toolsets`、`mcp_servers`、`max_turns` 本就完全一致，仅 `invest` 用 `custom:bailian`，其余 5 个用 `minimax-cn` + `MiniMax-M3`。`config.yaml` 承担共享基础设施角色，差异化由 `SOUL.md` + 独立数据目录实现，因此本次改动对其他 profile 无实际影响
+
+### 经验总结
+
+1. **同名 provider 是隐蔽的高危配置**。`custom_providers` 为 list 结构时，YAML 不会报重复错误，但"取首个"与"全部加载"两种消费策略会产生不一致的可见模型集，且症状表现为"某个客户端看不到某个模型"，极易误判为前端缓存问题。若确实需要多套 endpoint，应使用不同 name（如 `bailian-coding`）而非同名。
+2. **端口即链路指纹**。当"服务端数据正确但客户端显示错误"时，先确认客户端连的到底是哪个进程。本例中 `gateway run`(8643) 与 `hermes serve`(45241) 是两个独立进程，直接用 HTTP API 验证会得出错误结论。`window.hermesDesktop.getGatewayWsUrl()` 是定位 Desktop 真实后端的有效手段。
+3. 建议在配置加载阶段对 `custom_providers` 做同名检测并 warning，可在源头暴露此类问题。
+
+---
+
+## 2026-09-01: rebase 后 cli.py 多处语法错误（bridge 代码插入位置错误）
+
+### 症状
+`hermes` 启动报 `SyntaxError: unterminated string literal (detected at line 10071)`，逐层排查发现 cli.py 中有 5 处 rebase 冲突残留。
+
+### 根本原因
+`b1d7bb69c5` (feat(bridge): restore TUI→WeChat mirror sync after upstream rebase) 在 rebase 时将 bridge 自定义代码错误地插入到了 `_claim_active_session` 方法的 `try_acquire_active_session()` 调用中间，导致：
+
+1. **`_claim_active_session` 被截断**：bridge 变量插入到 `metadata=...` 参数和闭合 `)` 之间，缺少 `)` + `except` 块 + `_release_active_session` 方法定义
+2. **`_preload_resumed_session` 方法定义丢失**：只剩 docstring 后半部分和方法体，缺少 `def _preload_resumed_session(self) -> bool:` 和 docstring 开头
+3. **kanban image-ref 提取代码结构错误**：缺少导入和 `_conn = _kb.connect()`，缩进/try-except 结构错乱
+4. **外层 try 块缺少 finally**：`if quiet:` 块缩进少 4 空格脱离 try 块，缺少 `finally: _finalize_single_query(cli)`
+5. **`CLIAgentSetupMixin` 导入被删除**
+6. **`hermes_cli/commands.py` 也有语法错误**：`/save` 命令被拆分，bridge 命令插入位置导致括号不匹配
+
+### 修复方案
+1. 恢复 `CLIAgentSetupMixin` 导入
+2. 将 bridge 变量从 `_claim_active_session` 内部移到 `__init__` 末尾
+3. 补全 `_claim_active_session` 的 `)` + `except` + `_release_active_session` 方法
+4. 补全 `_preload_resumed_session` 方法定义和 docstring 开头
+5. 修复 kanban image-ref 提取代码结构
+6. 批量增加 `if quiet: ... else: ...` 块 4 空格缩进 + 补全 `finally`
+7. `hermes_cli/commands.py` 用上游版本覆盖，重新添加 `/bridge` 命令
+
+### 验证
+- `python3 -m py_compile cli.py` → EXIT 0
+- `python3 -c "import cli"` → Import OK
+- `hermes --help` → 正常
+
+### 经验总结
+rebase 冲突解决时自定义代码块被插入到上游方法调用中间是高危场景。每次 rebase 后必须运行 `python3 -m py_compile` 验证所有修改过的 .py 文件语法。bridge 相关的 6 个提交全部继承了同一批语法错误，说明问题在第一个 rebase 提交就引入了。
+
+---
+
+## 2026-09-01: hermes desktop 安装依赖失败（blobatar ETARGET + npm engine 不兼容）
+
+### 症状
+
+运行 `hermes desktop` 时，依赖安装失败：
+```
+npm error code ETARGET
+npm error notarget No matching version found for blobatar@2.0.0 with a date before 8/18/2026
+```
+
+### 根本原因
+
+1. **`min-release-age` age gate 拦截**：项目 `.npmrc` 配置了 `min-release-age=14`，要求所有 npm 包发布超过 14 天。`blobatar@2.0.0` 发布于 2026-08-19，距今仅约 13 天，被拦截。
+2. **`min-release-age-exclude` 不被当前 npm 支持**：虽然 `.npmrc` 中配置了排除列表，但 npm 11.12.1（以及 npm 10.9.4）不支持 `min-release-age-exclude` 配置项（warning: "Unknown project config min-release-age-exclude. This will stop working in the next major version"）。该配置仅在更高版本 npm 中生效。
+3. **npm engine 限制**：项目 `package.json` 要求 `npm <11.10.0 || >=11.17.0`，system 默认 npm 11.12.1 不满足。需要使用 nvm 的 node v22.22.0（自带 npm 10.9.4，满足 `<11.10.0`）。
+4. **lockfile 不同步**：`package-lock.json` 中不包含 `blobatar` 条目（workspace 子包 `apps/desktop/package.json` 引用了它但 root lockfile 未同步），导致 npm 报 `Cannot read properties of null (reading 'edgesOut')`。
+
+### 修复方案
+
+1. 临时注释 `.npmrc` 中的 `min-release-age=14`（因 exclude 在当前 npm 版本不生效）。
+2. 删除不同步的 `package-lock.json`。
+3. 使用 nvm 切换到 node v22.22.0（npm 10.9.4 满足 engine 要求）。
+4. 重新执行 `npm install` 生成新的 lockfile。
+
+```bash
+# 关键命令
+export NPM_CONFIG_PREFIX=""
+export NVM_DIR="$HOME/.nvm" && . "$NVM_DIR/nvm.sh"
+nvm use --delete-prefix v22.22.0 --silent
+rm -f package-lock.json
+npm install --lockfile-version=3
+```
+
+5. 将 `blobatar` 加入 `.npmrc` 的 `min-release-age-exclude` 列表（为将来重新启用 age gate 时做准备）。
+
+### 验证结果
+
+- `blobatar@2.0.0` 成功安装到 `node_modules/blobatar/`
+- `hermes desktop` 依赖安装成功（`added 790 packages`）
+- 恢复 age gate 的问题暂时保留注释状态，待 blobatar 2.7.0 (2026-08-29) 超过 14 天后可恢复
+
+### 经验总结
+
+- `min-release-age-exclude` 是较新的 npm 配置项，在 npm 11.12.x 及更早版本中不被支持（仅有 warning，不生效）。使用时需确认 npm 版本兼容性。
+- workspace 项目的 `package-lock.json` 需要包含所有 workspace 子包的依赖，否则 `npm ci` 会因 lockfile 不完整而报 `edgesOut` 错误。
+- `nvm use --delete-prefix` 需要配合 `NPM_CONFIG_PREFIX=""` 使用，否则用户 `.npmrc` 中的 `prefix` 设置会干扰 nvm 的 npm 路径。
+
+---
+
 ## 2026-09-01: 同步上游 origin/main → v2026.8.31-172-g6b7954b940
 
 - 上游新增 352 commits，新 stable tags：`v2026.8.16.2`、`v2026.8.18`、`v2026.8.19`、`v2026.8.27`、`v2026.8.31`
