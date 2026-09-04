@@ -12,6 +12,27 @@ import { coalesceToolOnlyAssistants, createToolMergeCache, toRuntimeMessage } fr
 const FALLBACK_STATUS = getAutoStatus(false, false, false, false, undefined)
 
 /**
+ * Did the derived repository actually move?
+ *
+ * Reference identity per item, not deep equality — the WeakMap below guarantees
+ * an unchanged `ChatMessage` converts to the SAME `ThreadMessage` object, so a
+ * differing reference means the turn really changed (the same reasoning
+ * `applyChangedMessages` uses in the runtime). `headId` is compared too: a
+ * branch switch can reorder the same set.
+ */
+const sameRepository = (a: ExportedMessageRepository, b: ExportedMessageRepository): boolean => {
+  if (a.headId !== b.headId || a.messages.length !== b.messages.length) {
+    return false
+  }
+
+  return a.messages.every((item, index) => {
+    const other = b.messages[index]
+
+    return item.message === other.message && item.parentId === other.parentId
+  })
+}
+
+/**
  * ChatMessage[] -> assistant-ui message repository, with a WeakMap identity
  * cache so unchanged messages convert once (and a tool-merge cache that folds
  * tool-only assistant turns into their neighbour). Shared by the main chat's
@@ -27,6 +48,11 @@ const FALLBACK_STATUS = getAutoStatus(false, false, false, false, undefined)
 export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMessageRepository {
   const cacheRef = useRef(new WeakMap<ChatMessage, ThreadMessage>())
   const toolMergeCacheRef = useRef(createToolMergeCache())
+  // The last repository handed out, so a no-op re-run can return it unchanged.
+  // Load-bearing: the runtime's adapter no-op gate compares `messageRepository`
+  // by reference, and a fresh-but-identical object re-opens the render loop the
+  // gate exists to close (see the identity tests in runtime-repository.test.ts).
+  const exportedRef = useRef<ExportedMessageRepository | null>(null)
 
   return useMemo(() => {
     const items: { message: ThreadMessage; parentId: string | null }[] = []
@@ -81,6 +107,15 @@ export function useRuntimeMessageRepository(messages: ChatMessage[]): ExportedMe
       }
     }
 
-    return { headId, messages: items }
+    const next: ExportedMessageRepository = { headId, messages: items }
+    const previous = exportedRef.current
+
+    if (previous && sameRepository(previous, next)) {
+      return previous
+    }
+
+    exportedRef.current = next
+
+    return next
   }, [messages])
 }
