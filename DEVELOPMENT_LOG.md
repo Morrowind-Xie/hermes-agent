@@ -4,6 +4,147 @@
 
 ---
 
+## 2026-09-04: Desktop "workspace failed to render" 渲染死循环（assistant-ui 缓存写回缺陷）
+
+### 症状
+
+主面板反复出现错误框：
+
+```
+"workspace" failed to render
+Maximum update depth exceeded. The result of getSnapshot should be cached
+to avoid an infinite loop.
+```
+
+`~/.hermes/logs/desktop.log` 中自 9-01 起累计 **9,516 次**;另一变体 `This can happen when a resource repeatedly calls setState inside useEffect` 与之以约 35ms 间隔交替刷屏。
+
+### 排查过程
+
+1. **定位报错来源**：文案来自 `contrib/react/boundary.tsx` 的 `“${id}” failed to render`,`id` 是 pane id。**错误框是防爆墙，不是故障点**——抛错的是它包住的聊天面子树。
+2. **排除一方订阅代码**：枚举 desktop 全部 8 处 `useSyncExternalStore`,逐个核对快照——均有 key 缓存或签名门；另确认无 `useStore($x, mapper)`、无 `Provider value={{...}}` 内联对象。
+3. **抓真实栈（关键手法）**：`electron/main.ts:864` 定义 `DESKTOP_LOG_PATH = ~/.hermes/logs/desktop.log`,渲染器 console 落盘且带 `bundle:line:col`。
+4. **行列反查 minified 符号**：`sed -n '93p' index-*.js | cut -c22000-24800` 读出 `gVe`=UseTapEffects、`KR`=AuiProvider;再取 `174:20526`、`264:56472` 得 `u7e`=TranscriptWindowProvider、`Kat`=**ChatRuntimeBoundary**。链路锁定 `ChatRuntimeBoundary → TranscriptWindowProvider → AssistantRuntimeProvider → AuiProvider → UseTapEffects`。
+5. **第一次误判（真 bug,非根因）**：`useRuntimeMessageRepository` 的 `useMemo([messages])` 在 `messages` 引用抖动时返回**内容相同、引用全新**的 repository,而 `incremental-external-store-runtime.ts:197` 的空操作门用 `===` 比较 → 门失效 → 全量路径末尾**无条件 `_notifySubscribers()`**。已修并补测试（`2a613351c2`）。
+6. **第二个方法错误（务必记住）**：修复后我 grep `error-boundary` 只限定了 `11:33–11:59` 区间，得到"0 次捕获"便宣布症状消除。**实际 12:44、12:45 仍在崩**——我把一个恰好安静的时间窗当成了证据。
+7. **转折点**：套件里 20 个失败（5 文件）我一度判为"既有且无关",其实**就是同一个 bug**——`streaming.test.tsx` 用 assistant-ui **自带的** `useExternalStoreRuntime`,不经任何 Hermes 代码即可复现。由此获得 **30 秒确定性复现台**。
+8. **插探针定位抖动源**：给 `LazyMemoizeSubject.getState` 加"按实例计数、超阈值打印 `binding.path`"探针 → `path: {}` 被重建 **200+ 次**;因按实例计数，25→50→100→150→200 递增证明是**同一对象在抖**而非每帧新建。探针用完还原。
+9. **比对 npm tarball**：`@assistant-ui/core@0.3.17` 同一处已加 `shallowEqualOrUndefined` 守卫。
+10. **决定性实验**：把 0.3.17 那一行移植进已安装的 0.2.23（文件顶部已有局部 `shallowEqual`,无需新依赖）,那 5 个文件 `20 failed | 17 passed` → **`37 passed` 全绿**。因果证实。
+
+### 根本原因
+
+**第三方库缺陷，非 Hermes 代码**：`@assistant-ui/core <= 0.2.23` 的 `LazyMemoizeSubject.getState` 每次重建都用新对象**无条件覆盖缓存**,导致连续两次 `getState()` 返回不同引用；而 `@assistant-ui/tap` 自己重写的 `useSyncExternalStore` 把 `value` 放进 effect 依赖、并在深度 50 时**直接 throw**（React 官方实现只重读不抛）,一个缓存不稳定被放大成整面板崩溃。Hermes 侧 adapter 每帧新建字面量 + 全量路径无条件 notify 是**放大器**,非必要条件。
+
+### 修复方案
+
+零依赖补丁 `scripts/patch-assistant-ui-render-loop.mjs`,挂到**已存在**的根 `postinstall`（未引入 patch-package,尊重供应链政策）。特性：幂等；包缺失静默跳过；**检测到 0.3.x 上游修复后自动 no-op**;形状不匹配时打显式警告但**不阻断安装**（阻断安装会连带挡住安全更新）。提交 `02a641c638`。正解仍是升级 core ≥ 0.3（跨 minor,需全量套件评估）。已确认 **0.2.23 非刻意 pin**：core 于 `5826450d17`(2026-08-01) 才"声明为直接依赖",此后从未 bump。
+
+### 验证
+
+| 层次 | 结果 |
+|---|---|
+| 测试 | 5 文件 `37 passed`（基线 20 failed） |
+| 安装钩子 | 真实 `hermes desktop --build-only` 过程中 postinstall 输出 `✓ patch applied` |
+| 产物 | 带补丁重建并重启（旧进程无视 SIGTERM,须等其退出，否则新实例撞单实例锁即退出） |
+| 运行时 | 重启后 0 次循环、0 次边界捕获（对照：修复前启动 12 秒内 15 次）;同期 12 条活跃事件行证明进程存活 |
+
+**尚待确认**：交互期（前端机器人对话）触发的爆发需实际使用验证。复查：`tail -n +40385 ~/.hermes/logs/desktop.log | grep -c 'Maximum update depth'`
+
+### 经验总结
+
+1. **"既有失败测试"是线索不是噪音**。把它们归为无关，直接损失了最快的复现台。见到同类错误文案，第一反应应是"和我的 bug 是不是同一个"。
+2. **压缩产物可逆向调试**：`desktop.log` 的 renderer console 带 `bundle:line:col`,配 `sed -n 'Np' | cut -cA-B` 即可把 minified 符号反查回组件名，成本远低于搭 CDP。
+3. **探针必须按实例计数**,否则无法区分"一个对象在抖"和"每帧新建对象"——这两种成因修法完全不同。
+4. **区分"真 bug"与"根因"**:第 5 步的修复是对的、有测试、值得保留，但它没解决用户症状。修好一个真实缺陷 ≠ 修好眼前问题，不能据此结案。
+5. **"0 次发生"的结论必须显式交代采样窗口**,否则极易把安静区间当疗效。
+6. **查依赖 pin 的意图**：`git log -S'"@assistant-ui/core"'` 一查即知是"没跟上"而非"刻意锁",直接决定走升级还是走补丁。
+
+---
+
+## 2026-09-04: hermes update 运行时修复反复失败（py-modules 漏登记顶层模块）
+
+### 症状
+
+`hermes update` 连续两次报：
+
+```
+→ Building a relocatable replacement environment...
+ℹ Managed Python runtime was not replaced; the existing venv is unchanged
+  (replacement environment did not pass dependency and import smoke tests)
+```
+
+真实原因只在 `~/.hermes/logs/agent.log` 里：
+
+```
+WARNING hermes_cli.managed_uv: candidate venv smoke failed:
+ModuleNotFoundError: No module named 'hermes_state_holders'
+```
+
+### 根本原因
+
+9-03 上游 `hermes_state.py` quarantine 重构（`5e01b8fa7a`、`06d7b77b1c`,#90837 系列）拆出两个**顶层单文件模块** `hermes_state_holders.py` / `hermes_state_registry.py`,但未登记进 `pyproject.toml` 的 `[tool.setuptools] py-modules`。
+
+`managed_uv.py::_stage_candidate_venv` 用 `uv sync` 装**非可编辑**的 wheel,`hermes_state.py:63` 导入 `hermes_state_holders` 即失败 → 导入冒烟测试不过 → 更新器按 fail-safe 拒绝换装。checkout 本身能跑是因为 **repo 根在 `sys.path` 上**,恰好掩盖了打包缺失。
+
+### 修复方案
+
+两个模块加入 `py-modules`（`02af54ce95`）。全仓 `*.py` 审计确认无其他被打包代码引用的遗漏（`mini_swe_runner` 仅测试引用，`setup.py` 是构建垫片）。
+
+### 验证
+
+第三次 `hermes update` 成功：`✓ Managed Python runtime repaired (SQLite 3.45.1 → 3.53.1)`,pending fleet restart 完成；`hermes doctor` 转为 `✓ SQLite 3.53.1`,原先 4 个 WAL 暴露库的告警全部解除。
+
+已提上游 PR [#102624](https://github.com/NousResearch/hermes-agent/pull/102624),被维护者关闭为 #102200 的重复（后者额外带一个 glob `hermes_state*.py` 的 fail-closed 回归测试）,但 live 复现证据被明确署名保留。
+
+### 经验总结
+
+1. **新增顶层单文件模块必须同步登记 `py-modules`**——列表处注释已明说，但重构时很容易漏；这类缺失只在 wheel/托管安装路径暴露，源码 checkout 永远看不出问题。
+2. **上游同类 PR 堆积时不要指望合并自己的**：同一 bug 上游已有 #101891/#101167/#102469/#102418/#102200 五个开放 PR（#102142 已关）。维护者选带回归测试的那个作载体，符合仓库"3+ 同类 PR 不逐个合并"的规范。
+3. **`gh pr create` 不能和 `git push` 放同一批并行命令**——push 尚未在 GitHub 落地就建 PR，会报 `No commits between`。
+4. **worktree 建在 `/tmp` 会因命令会话的 PrivateTmp 命名空间而跨命令不可见**,导致分支被幽灵 worktree 锁住；纯 plumbing（临时 `GIT_INDEX_FILE` + `read-tree`/`apply --cached`/`write-tree`/`commit-tree`）可完全绕开工作树建 PR 分支。
+
+---
+
+## 2026-09-04: state.db 结构性损坏恢复（SQLite WAL-reset 漏洞）
+
+### 症状
+
+CLI 发送消息后无回复，提示 state 数据库结构性损坏、转写将在重启时丢失。`state.db` 941MB;`fts_rebuild_deferral` 显示 FTS 重建已被推迟重试 **1113 次**（自 9-01）,即文件带伤运行数日。
+
+### 排查过程
+
+1. 确认损坏类别：日志报 `database disk image is malformed outside the FTS shadow tables`——**canonical b-tree 受损**,`hermes doctor --fix` 的 schema/FTS 策略不适用，应走离线恢复道。
+2. 停写：`hermes gateway stop`（systemd 用户服务，drain 后 exit 0）+ `systemctl --user stop hermes-webui`。quarantine 按设计**跳过了 close-time WAL checkpoint**,`-wal`/`-shm` 证据得以保留。
+3. 停写后先做**持久取证快照**（三件套一起拷，md5 与源一致）。
+4. `hermes sessions recover --inspect-only`（该命令从不打开源文件，只检查临时副本并校验源指纹未变）→ `recoverable: false`,原因仅 `messages` 表。
+5. 转 `--allow-partial` 逐行打捞到新库：救回 **1,426 sessions / 64,197 messages**。
+6. 新库 `integrity_check = ok`;清掉随坏库复制来的 `fts_stale` / `fts_rebuild_deferral` 派生标记（恢复时 FTS 已重建，标记过时）。
+7. 冒烟测试（真实导入路径，非 mock）通过后，停掉最后一个持有旧 inode 的进程（交互 CLI）再换装。
+
+### 根本原因
+
+venv 链接的 SQLite 落在 WAL-reset 漏洞窗口（doctor 报 3.45.1，网关进程报 3.50.4;修复版 3.51.3+/3.50.7/3.44.6）,而库运行在 WAL 模式。损伤特征（rowid 乱序、页重复引用）与 WAL-reset 吻合。
+
+### 验证
+
+| 数据 | 结果 |
+|---|---|
+| sessions | 1,426 全恢复（0 跳过，比坏库索引能 COUNT 到的 1,334 还多） |
+| messages | 64,197 全恢复，**0 跳过区间**——转写实际零丢失 |
+| 派生数据 | gateway_routing 117/123、system_prompts 759/760、usage 1376/1378（均可重建） |
+
+网关重启后 `session_store: ok`,5 个平台全 connected;`hermes sessions repair --check-only` → "opens cleanly — no repair needed"。
+
+### 经验总结
+
+1. **COUNT 失败 ≠ 数据不可读**。`messages` 表 `COUNT(*)` 走索引路径撞上损坏页而报错，被判"严格不可恢复";但 rowid 逐行扫描全表一条没跳。所以 `recoverable: false` 时务必试 `--allow-partial`。
+2. **恢复流程自带的快照是临时的、会被清理**——要留取证件必须自己另拷一份三件套，且必须在停写之后（`state.db`/`-wal`/`-shm` 是同一个活镜像，不能各自独立拷贝）。
+3. **绝不用系统 `sqlite3` 的 `.recover` 碰 live 文件**（3.45.1 属易受攻击版本，可能二次损坏）;恢复命令自带版本安全门且只作用于副本。
+4. **并行发命令会制造假象**，本次踩到三次：`cp` 与 `sqlite3 DELETE` 并发撕出坏副本；`mv` 换装与 `integrity_check` 并发读到换装一半的旧文件，报出"页号超出新文件总页数"的荒谬损坏（正是识别并发的铁证）,最终靠 md5 比对确认换装完好。有依赖关系的操作必须串行。
+5. **`gateway stop` 有 drain 窗口**,紧接着查 `systemctl is-active` 会误判"没停下来"。
+
+---
+
 ## 2026-09-01: Desktop 模型菜单缺失 qwen3.8-max（custom_providers 同名条目冲突）
 
 ### 症状
