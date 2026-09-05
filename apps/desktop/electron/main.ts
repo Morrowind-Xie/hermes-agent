@@ -17824,6 +17824,14 @@ if (!isPrimaryInstance) {
   // reapOrphans() SIGTERMs the running instance's live backend (#87295).
   // app.exit() terminates immediately, before `ready`, so a second launch
   // routes into the running window and never touches backend machinery.
+  //
+  // Log it, and flush synchronously on the way out. rememberLog() only buffers
+  // (a 120ms timer writes), so a hard exit inside module evaluation loses every
+  // line this process produced — which made "I ran hermes desktop and nothing
+  // happened" indistinguishable in desktop.log from a crash on startup. The one
+  // line below is what tells a lost lock apart from a failed boot.
+  rememberLog('[boot] another Hermes Desktop instance holds the single-instance lock; routing to it and exiting')
+  flushDesktopLogBufferSync()
   app.exit(0)
 } else {
   app.on('second-instance', (_event, argv) => {
