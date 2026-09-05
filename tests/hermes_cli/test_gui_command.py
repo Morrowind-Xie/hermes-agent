@@ -1133,6 +1133,65 @@ def test_gui_bridges_ozone_hint_to_launch_env(tmp_path, monkeypatch):
     assert launch_env.get("ELECTRON_OZONE_PLATFORM_HINT") == "wayland"
 
 
+def test_gui_source_launch_applies_configured_electron_flags(tmp_path, monkeypatch):
+    """``desktop.electron_flags`` must reach BOTH launch paths.
+
+    The flags used to be appended only to the packaged executable, so
+    ``hermes desktop --source`` ran on a different Ozone backend than the one the
+    user configured — and on a Wayland-capable host (WSLg) that silently drops
+    CJK input, because the X11-only IM bridge is gone with it.
+    """
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+
+    ok = subprocess.CompletedProcess([], 0)
+    cfg = {"desktop": {"electron_flags": ["--ozone-platform=x11"]}}
+    calls: list = []
+
+    def _run_source(args, **kwargs):
+        calls.append((args, kwargs))
+        return ok
+
+    with patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=False), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main._register_linux_desktop_entry"), \
+         patch("hermes_cli.config.load_config", return_value=cfg), \
+         patch("hermes_cli.main.subprocess.run", side_effect=_run_source), \
+         pytest.raises(SystemExit) as exc:
+        cli_main.cmd_gui(_ns(source=True))
+
+    assert exc.value.code == 0
+    assert len(calls) == 1, f"expected one launch, got {calls}"
+    launched = calls[0][0]
+    assert launched[:5] == ["/usr/bin/npm", "exec", "--", "electron", "."]
+    assert "--ozone-platform=x11" in launched
+
+
+def test_gui_source_launch_stays_clean_without_configured_flags(tmp_path, monkeypatch):
+    """No flags configured → the source argv gains nothing (no empty-arg drift)."""
+    root = _make_desktop_tree(tmp_path)
+    monkeypatch.setattr(cli_main, "PROJECT_ROOT", root)
+
+    ok = subprocess.CompletedProcess([], 0)
+    calls: list = []
+
+    def _run_source(args, **kwargs):
+        calls.append(args)
+        return ok
+
+    with patch("hermes_cli.main._resolve_node_runtime_npm", return_value="/usr/bin/npm"), \
+         patch("hermes_cli.main._desktop_build_needed", return_value=False), \
+         patch("hermes_cli.main._desktop_macos_relaunchable_fixup"), \
+         patch("hermes_cli.main._register_linux_desktop_entry"), \
+         patch("hermes_cli.config.load_config", return_value={}), \
+         patch("hermes_cli.main.subprocess.run", side_effect=_run_source), \
+         pytest.raises(SystemExit):
+        cli_main.cmd_gui(_ns(source=True))
+
+    assert calls == [["/usr/bin/npm", "exec", "--", "electron", "."]]
+
+
 # --- desktop.password_store detection & bridging (linux) ------------------
 
 
