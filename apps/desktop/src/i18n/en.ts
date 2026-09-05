@@ -84,7 +84,10 @@ export const en: Translations = {
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'Gateway sign-in required',
-      ipcBridgeUnavailable: 'Desktop IPC bridge is unavailable.'
+      ipcBridgeUnavailable: 'Desktop IPC bridge is unavailable.',
+      localBackendPoolSaturated: 'Local agent limit reached',
+      localBackendPoolSaturatedDetail:
+        'Every local backend slot is busy with profiles you already have open. Close another bot pane, or raise the limit under Settings → Advanced, then open this bot again.'
     },
     failure: {
       title: "Hermes couldn't start",

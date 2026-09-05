@@ -283,6 +283,8 @@ import {
 import { selectPoolEvictions } from './pool-eviction'
 import { clampPoolLimits, parsePoolLimits, POOL_LIMITS_DEFAULTS } from './pool-limits'
 import {
+  decideLocalBackendAdmission,
+  localBackendPoolSaturatedMessage,
   LocalBackendSpawnCoordinator,
   type LocalBackendSpawnRequest,
   releaseLocalBackendSlotAfterExit
@@ -12249,6 +12251,25 @@ function evictLruPoolBackends(keep) {
   }
 }
 
+/**
+ * Leases that can still come free, so a queued spawn is waiting on something
+ * real: a teardown already in flight (its lease releases once the child's exit
+ * is proven) and a running backend that LRU eviction is allowed to reclaim.
+ * When this is zero and the pool is at cap, nothing in the pool can ever
+ * release — see `decideLocalBackendAdmission`.
+ */
+function localBackendSlotsThatMayFree() {
+  return {
+    stoppingCount: poolStopper.stoppingCount(),
+    reclaimableCount: selectPoolEvictions(
+      backendPool.entries(),
+      poolMaxBackends() - 1,
+      Date.now(),
+      POOL_KEEPALIVE_FRESH_MS
+    ).length
+  }
+}
+
 function startPoolIdleReaper() {
   if (poolIdleReaper) {
     return
@@ -12378,6 +12399,23 @@ async function spawnPoolBackend(profile, entry, opts: { forceLocal?: boolean; po
   // pool-idle window (10 min) would hold the pool key hostage and every
   // later click on the profile would join that stale wait. Failing here
   // surfaces the "all N slots busy" reason instead of a generic boot timeout.
+  // Over-subscription is not a transient condition. Every slot is held for the
+  // lifetime of a running backend, and the panes holding them ping their
+  // keepalive every 60s, so LRU eviction spares all of them: the queue cannot
+  // drain and the 30s wait buys nothing but a later, vaguer failure — while the
+  // renderer's transport backoff re-arms the identical doomed request every few
+  // seconds (the field case: three profiles stuck at `3/3 busy` for 3.5 hours).
+  // Fail immediately with the one thing the user can act on instead.
+  const admission = decideLocalBackendAdmission({
+    limit: poolMaxBackends(),
+    activeCount: localBackendSpawnCoordinator.activeCount,
+    ...localBackendSlotsThatMayFree()
+  })
+
+  if (admission === 'saturated') {
+    throw new Error(localBackendPoolSaturatedMessage(poolMaxBackends()))
+  }
+
   const spawnRequest = localBackendSpawnCoordinator.request(poolKey, { timeoutMs: POOL_SLOT_WAIT_MS })
   entry.localBackendSlotKey = poolKey
   entry.localBackendSpawnRequest = spawnRequest

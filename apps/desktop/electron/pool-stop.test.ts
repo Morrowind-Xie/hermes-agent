@@ -136,3 +136,39 @@ test('a respawn can await the in-flight stop before reusing the key', async () =
 
   assert.deepEqual(order, ['exit-signal', 'spawn'])
 })
+
+test('stoppingCount reports the leases about to free, and only those', async () => {
+  // Spawn admission asks this question to decide whether a full pool can still
+  // drain. A wrong answer either wedges a productive wait behind a false
+  // "saturated", or refuses a spawn whose slot was milliseconds from release.
+  const { addChild, exitResolvers, stopper } = harness()
+  const a = addChild('a')
+  const b = addChild('b')
+
+  assert.equal(stopper.stoppingCount(), 0, 'an idle pool has nothing releasing')
+
+  const stopA = stopper.stop('a')
+  assert.equal(stopper.stoppingCount(), 1)
+
+  // A second caller shares the same teardown and must not be counted twice, or
+  // admission would see two leases about to free.
+  assert.equal(stopper.stop('a'), stopA)
+  assert.equal(stopper.stoppingCount(), 1)
+
+  const stopB = stopper.stop('b')
+  assert.equal(stopper.stoppingCount(), 2)
+
+  exitResolvers.get(a)?.()
+  await stopA
+  assert.equal(stopper.stoppingCount(), 1, 'a completed teardown stops counting')
+
+  // A key already gone from the pool never started a teardown, so it is not an
+  // in-flight one.
+  await stopper.stop('gone')
+  assert.equal(stopper.stoppingCount(), 1)
+
+  exitResolvers.get(b)?.()
+  await stopB
+  assert.equal(stopper.stoppingCount(), 0)
+})
+

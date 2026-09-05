@@ -132,6 +132,8 @@ export interface Translations {
       gatewayConnectionLostDetail: string
       gatewaySignInRequired: string
       ipcBridgeUnavailable: string
+      localBackendPoolSaturated: string
+      localBackendPoolSaturatedDetail: string
     }
     failure: {
       title: string

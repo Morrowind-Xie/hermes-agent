@@ -84,7 +84,10 @@ export const zh: Translations = {
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: '需要登录网关',
-      ipcBridgeUnavailable: '桌面 IPC 桥不可用。'
+      ipcBridgeUnavailable: '桌面 IPC 桥不可用。',
+      localBackendPoolSaturated: '已达本地 Agent 上限',
+      localBackendPoolSaturatedDetail:
+        '所有本地后端槽位都已被你打开的 profile 占用。关闭另一个机器人面板，或在「设置 → 高级」中提高上限，然后重新打开该机器人。'
     },
     failure: {
       title: 'Hermes 无法启动',
