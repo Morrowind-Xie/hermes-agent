@@ -173,4 +173,3 @@ describe('local backend pool saturation', () => {
     expect(getConnection.mock.calls.length).toBe(dialCount)
   })
 })
-

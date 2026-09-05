@@ -375,10 +375,7 @@ test('at cap with nothing able to free, the spawn is refused instead of made to 
 
 test('a backend already stopping makes the wait productive again', async () => {
   // The lease releases once the child's exit is proven, so the queue can drain.
-  assert.equal(
-    decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 1, reclaimableCount: 0 }),
-    'wait'
-  )
+  assert.equal(decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 1, reclaimableCount: 0 }), 'wait')
 
   // And the wait really does drain, end to end: a refused-then-freed slot.
   const coordinator = new LocalBackendSpawnCoordinator(1)
@@ -392,10 +389,7 @@ test('a backend already stopping makes the wait productive again', async () => {
 })
 
 test('a backend that eviction may reclaim makes the wait productive', () => {
-  assert.equal(
-    decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 0, reclaimableCount: 1 }),
-    'wait'
-  )
+  assert.equal(decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 0, reclaimableCount: 1 }), 'wait')
 })
 
 test('a lowered cap over the running count is saturation while nothing can free', () => {
@@ -426,6 +420,9 @@ test('main and the renderer agree on the verdict across the IPC boundary', () =>
     false,
     'a timeout means something WAS freeing — the fast transport clock stays right'
   )
-  assert.equal(isLocalBackendPoolSaturatedError(new Error('Profile backend start for "x" was cancelled before spawn.')), false)
+  assert.equal(
+    isLocalBackendPoolSaturatedError(new Error('Profile backend start for "x" was cancelled before spawn.')),
+    false
+  )
   assert.equal(isLocalBackendPoolSaturatedError(undefined), false)
 })
