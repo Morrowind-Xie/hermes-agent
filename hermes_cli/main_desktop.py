@@ -1539,7 +1539,13 @@ def cmd_gui(args: argparse.Namespace):
 
     if source_mode:
         print("→ Launching Hermes Desktop from source build...")
-        launch_command = [npm, "exec", "--", "electron", "."]
+        # The same flag funnel as the packaged path below. `desktop.electron_flags`
+        # used to be applied only there, so a `--source` launch silently ran on a
+        # different Ozone backend than the one the user configured — and on a
+        # Wayland-capable host (WSLg) that drops CJK input entirely, because the
+        # X11-only IM bridge goes away with it. Extended before `--local` below to
+        # mirror the packaged argv exactly.
+        launch_command = [npm, "exec", "--", "electron", ".", *config_electron_flags]
     else:
         if packaged_executable is None:
             print(f"✗ Desktop package build completed but no launchable app was found at: {desktop_dir / 'release'}")

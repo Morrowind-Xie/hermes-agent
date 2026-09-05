@@ -1,5 +1,7 @@
 import fs from 'node:fs'
 
+import { linuxOzoneBackend } from './hud-windowing'
+
 function isWslEnvironment(env = process.env, platform = process.platform, kernelRelease = null) {
   if (platform !== 'linux') {
     return false
@@ -141,8 +143,192 @@ function resolveLinuxPasswordStore(options: { env?: NodeJS.ProcessEnv; platform?
   return { store: requested, warning: null }
 }
 
+// ── Linux input-method reachability ────────────────────────────────────────
+//
+// CJK / dead-key input in Electron is not app logic: whether you can type
+// Chinese depends on the *toolkit* being able to reach an input-method
+// framework. On X11 a Chromium app only speaks two dialects — the IBus
+// protocol over the session bus (which is also how fcitx5's "IBus Frontend"
+// addon answers it), and GTK's im-modules (`--gtk-version=4` rides that path).
+// startx, SSH forwarding, a systemd-less container and WSLg each drop one of
+// those, and every one of them lands on the same maddening symptom: the IME
+// hotkey works in every other window and does nothing in this one.
+//
+// This reports only what the environment can *prove*, and stays silent unless
+// an input method was actually asked for, so it never cries wolf for users who
+// run without one.
+
+const GTK_LIB_ROOTS = ['/usr/lib', '/usr/lib64', '/lib', '/usr/local/lib']
+// Debian-style multiarch prefixes under a lib root (`x86_64-linux-gnu`, …) —
+// that, not `/usr/lib/gtk-3.0`, is where GTK's immodules really live.
+const MULTIARCH_SEGMENT = /^[a-z0-9_]+-linux(?:-|$)/
+const CJK_LOCALE = /^(zh|ja|ko)/
+
+/** The frameworks the session asked apps to route input through. */
+function requestedImModules(env: NodeJS.ProcessEnv): string[] {
+  const names = new Set<string>()
+
+  for (const key of ['GTK_IM_MODULE', 'QT_IM_MODULE'] as const) {
+    const value = String(env[key] || '')
+      .trim()
+      .toLowerCase()
+
+    if (value && value !== 'none') {
+      names.add(value)
+    }
+  }
+
+  const ximMatch = /@im=([^;\s]+)/i.exec(String(env.XMODIFIERS || ''))
+
+  if (ximMatch) {
+    names.add(ximMatch[1].toLowerCase())
+  }
+
+  // `xim` is the X server's own protocol and `*-simple` a GTK built-in — neither
+  // has a client module file to look for, so asking would only guarantee a
+  // false "not installed".
+  return [...names].filter(name => name !== 'xim' && !name.endsWith('-simple'))
+}
+
+/** Every `immodules` directory GTK could load a client module from. */
+function gtkImModuleDirs(readdir: (path: string) => string[]): string[] {
+  const roots = new Set(GTK_LIB_ROOTS)
+
+  for (const base of GTK_LIB_ROOTS) {
+    let entries: string[]
+
+    try {
+      entries = readdir(base)
+    } catch {
+      continue
+    }
+
+    for (const entry of entries) {
+      if (MULTIARCH_SEGMENT.test(entry)) {
+        roots.add(`${base}/${entry}`)
+      }
+    }
+  }
+
+  const dirs: string[] = []
+
+  for (const root of roots) {
+    for (const gtk of ['gtk-3.0', 'gtk-4.0']) {
+      let versions: string[]
+
+      try {
+        versions = readdir(`${root}/${gtk}`)
+      } catch {
+        continue
+      }
+
+      for (const version of versions) {
+        dirs.push(`${root}/${gtk}/${version}/immodules`)
+      }
+    }
+  }
+
+  return dirs
+}
+
+/** `<module>(gtk3|gtk4)` for each requested framework present on disk. */
+function installedGtkImModules(modules: readonly string[], readdir: (path: string) => string[]): string[] {
+  const found = new Set<string>()
+
+  if (!modules.length) {
+    return []
+  }
+
+  for (const dir of gtkImModuleDirs(readdir)) {
+    let files: string[]
+
+    try {
+      files = readdir(dir)
+    } catch {
+      continue
+    }
+
+    const toolkit = dir.includes('/gtk-4.0/') ? 'gtk4' : 'gtk3'
+
+    for (const name of modules) {
+      if (files.some(file => file.startsWith(`im-${name}`) && file.endsWith('.so'))) {
+        found.add(`${name}(${toolkit})`)
+      }
+    }
+  }
+
+  return [...found]
+}
+
+/**
+ * Describe the Linux input-method situation, and warn when no bridge exists.
+ *
+ * Returns `{ details, warning }`: `details` is the one-line summary worth
+ * having in the log when someone reports "IME works everywhere except Hermes"
+ * (empty when there is nothing to diagnose), `warning` an actionable sentence or
+ * null. Pure apart from the injected directory reader, so it runs before app
+ * `ready` and unit-tests without touching the real filesystem.
+ */
+function describeLinuxInputMethod(
+  options: {
+    argv?: readonly string[]
+    env?: NodeJS.ProcessEnv
+    platform?: NodeJS.Platform
+    readdir?: (path: string) => string[]
+  } = {}
+): { details: string; warning: null | string } {
+  const env = options.env ?? process.env
+  const platform = options.platform ?? process.platform
+
+  if (platform !== 'linux') {
+    return { details: '', warning: null }
+  }
+
+  const modules = requestedImModules(env)
+  const locale = String(env.LC_CTYPE || env.LC_ALL || env.LANG || '')
+
+  // No framework requested and no CJK locale: this user is not expecting an
+  // input method, so say nothing rather than print a line they can't act on.
+  if (!modules.length && !CJK_LOCALE.test(locale)) {
+    return { details: '', warning: null }
+  }
+
+  const readdir = options.readdir ?? ((path: string) => fs.readdirSync(path))
+  const backend = linuxOzoneBackend(env, options.argv ?? process.argv)
+  const hasSessionBus = Boolean(String(env.DBUS_SESSION_BUS_ADDRESS || '').trim())
+  const gtkModules = installedGtkImModules(modules, readdir)
+
+  const details = [
+    `ozone=${backend}`,
+    `DISPLAY=${env.DISPLAY || '-'}`,
+    `WAYLAND_DISPLAY=${env.WAYLAND_DISPLAY || '-'}`,
+    `im-module=${modules.join(',') || '-'}`,
+    `session-dbus=${hasSessionBus ? 'yes' : 'no'}`,
+    `gtk-im-modules=${gtkModules.length ? gtkModules.join(',') : 'none'}`
+  ].join(' ')
+
+  // Either bridge on its own is enough; only the absence of both is a verdict.
+  // And a verdict needs a framework someone actually asked for: a CJK locale on
+  // its own proves expectation, not brokenness, so it reports facts only.
+  if (!modules.length || hasSessionBus || gtkModules.length) {
+    return { details, warning: null }
+  }
+
+  return {
+    details,
+    warning:
+      `no input-method bridge is reachable: the session asks for "${modules.join('/')}" but ` +
+      'there is no session D-Bus for Chromium to speak IBus over, and no GTK im-module for it is ' +
+      'installed, so CJK/dead-key input cannot reach this app even where it works elsewhere. Fix ' +
+      'either one: launch from inside the graphical session (or export DBUS_SESSION_BUS_ADDRESS), or ' +
+      'install the toolkit front-end (e.g. fcitx5-frontend-gtk3 / fcitx5-frontend-gtk4, ibus-gtk3 / ' +
+      'ibus-gtk4), then restart Hermes Desktop.'
+  }
+}
+
 export {
   bundledRuntimeImportCheck,
+  describeLinuxInputMethod,
   detectRemoteDisplay,
   isWindowsBinaryPathInWsl,
   isWslEnvironment,

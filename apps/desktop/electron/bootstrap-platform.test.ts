@@ -4,11 +4,27 @@ import { test } from 'vitest'
 
 import {
   bundledRuntimeImportCheck,
+  describeLinuxInputMethod,
   detectRemoteDisplay,
   isWindowsBinaryPathInWsl,
   isWslEnvironment,
   resolveLinuxPasswordStore
 } from './bootstrap-platform'
+
+/** `readdirSync` over a fixed tree; throws like ENOENT for anything unstated. */
+function fakeReaddir(tree: Record<string, string[]>) {
+  return (dir: string): string[] => {
+    if (!(dir in tree)) {
+      throw Object.assign(new Error(`ENOENT: ${dir}`), { code: 'ENOENT' })
+    }
+
+    return tree[dir]
+  }
+}
+
+const EMPTY_FS = () => {
+  throw Object.assign(new Error('ENOENT: no filesystem in this test'), { code: 'ENOENT' })
+}
 
 test('isWslEnvironment detects WSL2 env vars on linux', () => {
   assert.equal(isWslEnvironment({ WSL_DISTRO_NAME: 'Ubuntu' }, 'linux'), true)
@@ -122,4 +138,138 @@ test('resolveLinuxPasswordStore warns on unknown values instead of applying them
 
   assert.equal(result.store, null)
   assert.match(String(result.warning), /keychain-of-wonders/)
+})
+
+// ── describeLinuxInputMethod ───────────────────────────────────────────────
+//
+// WSLg-shaped reports ("Ctrl+Space works everywhere else") are diagnosed from
+// desktop.log, so the contract these tests pin is: say nothing when there is
+// nothing to say, always echo the facts when an IME is expected, and reserve
+// the warning for a host where BOTH bridges are provably absent.
+
+test('describeLinuxInputMethod stays silent off Linux', () => {
+  assert.deepEqual(
+    describeLinuxInputMethod({
+      platform: 'darwin',
+      argv: [],
+      env: {
+        DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/501/bus',
+        DISPLAY: ':0',
+        GTK_IM_MODULE: 'fcitx',
+        LANG: 'zh_CN.UTF-8'
+      },
+      readdir: fakeReaddir({})
+    }),
+    { details: '', warning: null }
+  )
+})
+
+test('describeLinuxInputMethod says nothing when no input method is expected', () => {
+  assert.deepEqual(
+    describeLinuxInputMethod({
+      platform: 'linux',
+      argv: [],
+      env: { DISPLAY: ':0', LANG: 'C.UTF-8' },
+      readdir: EMPTY_FS
+    }),
+    { details: '', warning: null }
+  )
+})
+
+test('describeLinuxInputMethod reports the WSLg shape without warning (bus + explicit x11)', () => {
+  const { details, warning } = describeLinuxInputMethod({
+    platform: 'linux',
+    argv: ['--ozone-platform=x11'],
+    env: {
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      DISPLAY: ':0',
+      GTK_IM_MODULE: 'fcitx',
+      LANG: 'zh_CN.UTF-8',
+      QT_IM_MODULE: 'fcitx',
+      WAYLAND_DISPLAY: 'wayland-0',
+      XMODIFIERS: '@im=fcitx'
+    },
+    // A dead filesystem here is the interesting case: the session bus alone is
+    // a bridge, so no module may be on disk and nothing may be inferred.
+    readdir: EMPTY_FS
+  })
+
+  assert.match(details, /ozone=x11/)
+  assert.match(details, /WAYLAND_DISPLAY=wayland-0/)
+  assert.match(details, /im-module=fcitx/)
+  assert.match(details, /session-dbus=yes/)
+  assert.equal(warning, null)
+})
+
+test('describeLinuxInputMethod follows a Wayland session when the app asks for none', () => {
+  const { details } = describeLinuxInputMethod({
+    platform: 'linux',
+    argv: [],
+    env: {
+      DBUS_SESSION_BUS_ADDRESS: 'unix:path=/run/user/1000/bus',
+      GTK_IM_MODULE: 'ibus',
+      XDG_SESSION_TYPE: 'wayland'
+    },
+    readdir: EMPTY_FS
+  })
+
+  // Pure-Wayland sessions (XDG_SESSION_TYPE=wayland, no DISPLAY) are the ones an
+  // X11-only IME stack cannot serve — the log has to name the backend it picked.
+  assert.match(details, /ozone=wayland/)
+  assert.match(details, /im-module=ibus/)
+})
+
+test('describeLinuxInputMethod counts an installed GTK im-module as a bridge without D-Bus', () => {
+  const { details, warning } = describeLinuxInputMethod({
+    platform: 'linux',
+    argv: [],
+    env: { DISPLAY: ':0', GTK_IM_MODULE: 'fcitx', XMODIFIERS: '@im=fcitx' },
+    readdir: fakeReaddir({
+      '/usr/lib': ['x86_64-linux-gnu'],
+      '/usr/lib/x86_64-linux-gnu': ['gtk-3.0', 'gtk-4.0'],
+      '/usr/lib/x86_64-linux-gnu/gtk-3.0': ['3.0.0'],
+      '/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules': ['im-fcitx5.so', 'im-simple.so'],
+      '/usr/lib/x86_64-linux-gnu/gtk-4.0': ['4.0.0'],
+      '/usr/lib/x86_64-linux-gnu/gtk-4.0/4.0.0/immodules': []
+    })
+  })
+
+  assert.match(details, /session-dbus=no/)
+  assert.match(details, /gtk-im-modules=fcitx\(gtk3\)/)
+  assert.equal(warning, null)
+})
+
+test('describeLinuxInputMethod warns with a fix when neither bridge exists', () => {
+  const { details, warning } = describeLinuxInputMethod({
+    platform: 'linux',
+    argv: [],
+    env: { DISPLAY: ':0', GTK_IM_MODULE: 'fcitx', LANG: 'zh_CN.UTF-8', XMODIFIERS: '@im=fcitx' },
+    readdir: fakeReaddir({})
+  })
+
+  assert.match(details, /gtk-im-modules=none/)
+  assert.match(String(warning), /no input-method bridge/)
+  assert.match(String(warning), /DBUS_SESSION_BUS_ADDRESS/)
+  assert.match(String(warning), /fcitx5-frontend-gtk/)
+})
+
+test('describeLinuxInputMethod does not report XIM as a missing module', () => {
+  const { details, warning } = describeLinuxInputMethod({
+    platform: 'linux',
+    argv: [],
+    env: {
+      DISPLAY: ':0',
+      GTK_IM_MODULE: 'xim',
+      LANG: 'zh_CN.UTF-8',
+      QT_IM_MODULE: 'gtk-im-context-simple',
+      XMODIFIERS: '@im=xim'
+    },
+    readdir: fakeReaddir({})
+  })
+
+  // `xim` / `*-simple` have no client module to install, so they can never make
+  // the "not installed" verdict. A CJK locale still earns the facts line, so
+  // support can see what the session actually asked for.
+  assert.match(details, /im-module=-/)
+  assert.equal(warning, null)
 })
