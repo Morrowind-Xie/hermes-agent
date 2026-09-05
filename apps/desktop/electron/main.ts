@@ -74,6 +74,7 @@ import {
   shouldLatchRemoteReauthFailure
 } from './backend-start-failure'
 import {
+  describeLinuxInputMethod,
   detectRemoteDisplay,
   isWindowsBinaryPathInWsl,
   isWslEnvironment,
@@ -1756,6 +1757,25 @@ function rememberLog(chunk) {
 }
 
 installCrashForensics({ flush: flushDesktopLogBufferSync, log: rememberLog })
+
+// Linux: record how (and whether) an input method can reach this app, before
+// any window exists. CJK input is not our code — a Chromium app on X11 only
+// gets an input method through the IBus protocol on the session bus or a GTK
+// im-module, and a launch environment that drops both (startx, SSH, a
+// systemd-less container, WSLg) produces the report we keep re-diagnosing by
+// hand: "Ctrl+Space works in every other window, not in Hermes". The facts
+// always go to desktop.log — that line is the evidence support needs to tell a
+// missing bridge apart from an eaten hotkey — and a warning only when neither
+// bridge exists, so users without an IME never see it.
+const INPUT_METHOD_REPORT = describeLinuxInputMethod()
+
+if (INPUT_METHOD_REPORT.details) {
+  rememberLog(`[ime] ${INPUT_METHOD_REPORT.details}`)
+}
+
+if (INPUT_METHOD_REPORT.warning) {
+  rememberLog(`[ime] WARNING: ${INPUT_METHOD_REPORT.warning}`)
+}
 
 // A rejected loadURL leaves a blank window and, unhandled, no trace anywhere
 // the user can send us. `label` names the surface so the log says which one.
