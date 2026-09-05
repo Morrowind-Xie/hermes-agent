@@ -171,4 +171,3 @@ test('stoppingCount reports the leases about to free, and only those', async () 
   await stopB
   assert.equal(stopper.stoppingCount(), 0)
 })
-
