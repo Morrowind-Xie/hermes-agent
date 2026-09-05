@@ -4,6 +4,90 @@
 
 ---
 
+## 2026-09-05: Desktop「无法启动」= 后端池超额订阅饥饿 + 撞锁静默退出（两个互不相干的静默失败）
+
+### 症状
+
+用户报"desktop 无法正常启动"。实际是两段不同现象：
+
+1. desktop **能启动**（`[boot] Hermes backend is ready. Finalizing desktop startup` 正常出现），但除 invest 外的多个 bot 面板永久停在"唤醒中"，不可用；
+2. 用户之后再跑一次 `hermes desktop`：终端打出 2 行 bootstrap 后**无输出、无窗口、无日志**。
+
+### 排查过程
+
+1. **先定性"崩溃还是等待"**：`desktop.log` 无任何崩溃/renderer 异常签名，却有连续 3.5 小时的循环：
+   ```
+   Profile backend "music" waiting for a free local slot (3/3 busy, 1 queued)
+   Hermes backend for profile "music" failed to start: Local backend start for
+     "music" timed out while waiting for a free slot.
+   ```
+   ⇒ 不是崩溃，是"等待失败后被无限重启"。
+2. **用时间窗计数代替阅读**：`grep -ac 'timed out while waiting'` 在 UTC 08:00–11:36 持续命中，且 `music/work/coding` 稳定失败、`default/exam/fitness` 稳定成功 ⇒ 稳态供需失衡，不是随机竞态。
+3. **真实复现（关键手法）**：直接拉起打包版并把 stderr 落盘，拿到 Electron 侧
+   `Error occurred in handler for 'hermes:connection:for': Local backend start … timed out` —— 定位到 IPC 门，而不只是"后端没起来"。
+4. **排除租约泄漏**：`ps` 显示 4 个后端确实活着 ⇒ `activeCount=3` 是诚实读数。方向从"记账错了"转到"为什么槽位永远不会释放"。
+5. **算清需求集合**：`active-profile.json = {"profile":"invest"}` ⇒ 主后端被钉在 invest；`connection-config.ts:675` 路由表规定"本地非主 profile 一律 pool" ⇒ 需求 = 其余 **6** 个 profile，而 `pool-limits.json` 不存在 ⇒ cap = 缺省 **3**。
+6. **读准入链找死锁**：租约对"starting **或 running**"全程持有（`pool-spawn-coordinator.ts`）；LRU 只驱逐 `now - lastActiveAt > POOL_KEEPALIVE_FRESH_MS`(4min) 的条目（`pool-eviction.ts`）；而渲染器对每个打开的面板每 60s 发 keepalive ⇒ **所有槽位永远"新鲜"** ⇒ 驱逐不可能 ⇒ 队列数学上永不排空。
+7. 第二段症状单独查：撞锁分支的 `app.exit(0)` 发生在模块求值期，而 `rememberLog()` 只写内存缓冲（`DESKTOP_LOG_FLUSH_MS = 120`）⇒ 整批日志丢失 ⇒ 在"用户唯一能发给我们的证据"上与启动即崩完全同形。
+
+### 根本原因
+
+两条，互不相干，共同点是**都静默**：
+
+1. **上限类特性缺"需求 > 上限"时的策略**。`e924615bb1` 加 cap 是为治"进程波"（40+ 后端、load 30–50），但它把 cap 实现成对**运行中**后端的硬约束，而多面板常驻（`foregroundPinned`, #93892）使需求可长期高于 cap。两者相遇时没有任何一层介入：不驱逐、不降级、不报错，只排队到超时，再由 `reconnectBackoffDelayMs` 的 full jitter 重新武装。
+2. **硬退出路径不落日志**：`app.exit()` 绕过异步 flush。
+
+附带事实（内存才是真约束）：单个 profile 后端 ≈ 300–470MB，其中**它的 MCP 子进程 ≈ 168MB**；7 个后端常驻实测 `electron 621 + serve 1164 + MCP 1178 ≈ 2.96GB` —— MCP 与后端本体等价昂贵。
+
+### 修复方案
+
+故意把"分配资源"与"改变失败行为"分开：
+
+| 改动 | 做的事 | 是否分配资源 |
+|---|---|---|
+| `pool-limits.json → maxBackends: 6`（配置，非代码） | 6 个池 profile 全部拿到后端 | ✅ 真正起作用的是它 |
+| `ef2a6cca1e` | 撞锁退出前 `rememberLog` + `flushDesktopLogBufferSync()` | ❌ 只改可见性 |
+| `426ef1dea2` | 纯谓词 `decideLocalBackendAdmission()`；无槽可释放时**立即拒给**并给可操作原因；渲染器识别饱和 → 专用慢时钟(60–90s) + 每轮只解释一次 | ❌ 只改失败行为 |
+
+两个设计细节值得记：
+
+- **一个布尔字段别兼两职**：最初想用 `poolSaturated` 同时驱动"慢时钟"和"提示去重"，结果用户点击路径先置位 ⇒ 后台永远不再解释，恰好复刻了要消灭的静默。拆成 `poolSaturated` / `saturationAnnounced`，并在 `openSecondary` 成功处统一复位。
+- **抬 backoff 的 cap 不会变慢**：full jitter 从 300ms base 爬坡，`capMs` 要到约第 9 次才生效。要真慢必须换时钟，而不是调 cap。
+
+### 验证
+
+| 项目 | 修复前 | 修复后（真实运行；故意把 cap 压到 3 制造饱和） |
+|---|---|---|
+| `timed out while waiting` | 3.5 小时连续刷屏 | **0 次** |
+| 超额 profile 的失败 | 各白等 30s 后泛化失败 | 启动 46s 内 10 次**即时**拒给（同批 4ms 内），随后 5 分钟完全静默 |
+| 原因可见性 | 无处可见 | 日志与 IPC 消息直说"关面板或提高上限" |
+| 第二个实例撞锁 | **零日志** | 一行 `[boot] another … single-instance lock …`，退出码 0 |
+| cap=6 全量 | 3 个 profile 永远起不来 | **7 个后端全起**（1 primary + 6 pool），0 超时 |
+
+测试：新增 12 例（准入 8、stopper 计数 1、真实 store 饱和路径 4）；聚焦 31/31，相关面 28 文件 / 236 测试全绿；`tsc` 两套 config、`eslint` 全绿。提交按 hunk 拆分，用户另一份未提交的 IME 改动原样留在工作区（421 insertions 逐项核对一致），并用符号计数证明提交出的树无悬空引用。
+
+**采样窗口必须交代**：拒给前 46s 约 5s 一次，来自**未插桩定位**的某个消费者（面板恢复 / 名单轮询）—— 我改的是排队侧与重连侧，那路 burst 的调用方没查；toast 仅单元级证据（无法看屏确认）。
+
+### 遗留 / 未定性
+
+- **退出竞态（未改代码）**：更早一次 SIGTERM 退出中，`before-quit` 之后 0.28s 仍被迟到拨号重新进入 `startHermes()` 并走到 `Starting Hermes backend`（`backend-ownership.json` 残留 pid 大于原 primary 可证）。但第二次采样时实例**一行 teardown 都没写**，且期间出现一组无法解释的事件（实例存活、3 个池后端却被 SIGTERM、随后日志整体停止）。样本不足、机制未明 ⇒ 记为未定性。怀疑方向：`sshBootstrapCoordinator.shutdown()` 已密封 SSH 路径，主后端路径疑似缺同等守卫。
+- 打包版仍是旧 asar，需一次重建才带上这两个修复。
+- `pool-spawn-coordinator.test.ts` 内两段**读源码正则**测试属遗留反模式（本次未扩大，也未清理）。
+- MCP 是内存最大杠杆；`tdx` 指向不存在的 `venv/bin/eltdx-mcp`，每个后端都在白试一次。
+
+### 经验总结
+
+1. **"起不来"必须先分解**：崩死 / 卡住 / 起来但缺功能，三者日志签名完全不同；第一步永远是确认有没有 `[boot] … ready`。
+2. **用计数代替阅读**：时间窗上的 `grep -ac` 分布，比读 500 行尾巴更快区分"稳态饥饿"与"竞态"。
+3. **区分"掩盖"与"治好"**：把 cap 提到 6 让症状当场消失，只是让供需相等；若止步于此，多开一个面板就会以同样"无法启动"的形态复发。**配置改动与代码改动分开提交、分开叙述**，正是为了不让前者给后者盖章。
+4. **上限类设计必须同时回答"需求超过上限怎么办"**：驱逐？降级？排队？拒绝并说明？没有答案的 cap 会把一次性故障变成无限循环。
+5. **硬退出路径要同步刷日志**；一切 `process.exit` / `app.exit` 都是缓冲日志的天敌。
+6. **指数退避要读实现而不是读名字**：base / cap / jitter 三者共同决定实际节奏。
+7. **验证进程是副作用的一部分**：本次第二起"起不来"其实是我留下的实例持锁造成的。后台起 GUI 做验证时，`setsid` 保命、结束必查 `ps`、还原临时改过的配置，与启动同等重要。
+8. **别拿安静区间当疗效，也别拿单样本定罪**：第 3 条有 1 个正样本 + 1 组反常事件，够写"未定性"，不够写"根因"。
+
+---
+
 ## 2026-09-04: Desktop "workspace failed to render" 渲染死循环（assistant-ui 缓存写回缺陷）
 
 ### 症状
