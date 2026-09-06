@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-09-06: 上游同步至 96ed0e71ea（4403 → 0）+ `cmd_gui` 搬家导致的修复落点重放
+
+### 背景
+
+`main` 落后 `origin/main` **4403** 个提交、领先 44 个（本地私有修复）。直接把上游合进 `main` 会撞 6 个文件冲突（`agent/auxiliary_client.py`、`cli.py`、`gateway/platforms/weixin.py`、`gateway/run.py`、`pyproject.toml`、`tui_gateway/methods_complete.py`）。
+
+### 流程
+
+走既有 worktree `sync/upstream-20260905`（昨日已把上述冲突面全部解决）：先把在途工作落成 2 个提交 → `merge origin/main`（零冲突，15 个新提交）→ `merge main` → 验证 → `main` 快进。
+
+### 根本原因（唯一的真冲突）
+
+`merge main` 时 `hermes_cli/main.py` 报出一个跨 **2500 行** 的单 hunk：ours 侧只有 3 行，theirs 侧是整块旧代码。原因不是逻辑分歧，而是上游 `0e78694c72`（*simplify(compat): drop 198 re-exports/aliases*）把 desktop 启动逻辑整体抽到了 `hermes_cli/main_desktop.py`，`cmd_gui` 随之搬家 —— 本次要重放的那行修复正好住在这块里。
+
+用 `git diff <merge-base> main -- hermes_cli/main.py` 证明 theirs 侧相对基线**只有本次那一行改动**，因此安全取上游版本，再把修复重放到新落点。
+
+附带坑：`_resolve_node_runtime_npm` 已移到 `main_install_repair.py`，测试里 `patch("hermes_cli.main.X")` 的接缝集体失效（AGENTS.md 反复警告的 patch 目标问题）——新测试的 patch 目标必须跟着重指向 `main_desktop` / `main_install_repair`。
+
+### 验证（含失败归因方法）
+
+上游新形状里 `cmd_gui` 的 source 分支仍然不 extend `config_electron_flags`（只有 packaged 分支走），所以该修复依然必要。
+
+- **Python**：`tests/tools`(557 文件) + `tests/skills`(42) + gui/weixin/desktop-entry ≈ 8242 tests。
+  首轮 40 个文件失败 → 用**同一环境跑合并前的 `main` 做对照组**，39 个失败完全一致；换成正确的依赖基底后只剩 12 个，11 个与基线一致，剩下 `test_browser_real_profile.py` 在两棵树单独跑都是稳定的 `1 failed / 76 passed` → fork 既有失败，非本次引入。
+  直接相关文件全绿：`test_terminal_yield_to_background`、`test_terminal_task_cwd`、`test_reddit_reading_skill`、`test_rss_feeds_skill`、`test_gui_command`(49✓)、`test_gui_uninstall`、`test_linux_desktop_entry`。
+- **Desktop**：electron project 149 files / 2129 tests ✓；ui project **723 files ✓**；`tests-js` 9 files ✓；两个 tsc（`-p .` 与 `-p tsconfig.electron.json`）均 EXIT=0。
+- **Import 冒烟**：`hermes_cli.main`、`hermes_cli.main_desktop`、`cli`、`run_agent`、`gateway.run`、`gateway.platforms.weixin`（本地微信 bridge 存活）、`tui_gateway.server` 及 28 个 `agent/turn_*` 全部可导入。
+
+### 环境坑（下次同步直接照抄）
+
+1. 本 checkout 的 `.venv` 和 `venv` **都没有 pytest**（dev extras 未装），`scripts/run_tests.sh` 会直接拒绝运行。非侵入式替代（不污染 runtime 环境）：
+   `uv run --python venv/bin/python --no-project --with 'pytest==9.1.1' --with 'pytest-asyncio==1.3.0' --with 'pytest-timeout' -m pytest <path>`
+   基底**必须用 `venv`**（有 aiohttp/mcp）；`.venv` 是缺依赖的瘦环境，用它会把 40 个文件误判成回归。
+2. 同步后 `package.json`/`package-lock.json` 变了，不重装就会在渲染层报一大片 `Cannot find module '@testing-library/react'`（看着像合并炸了，其实是 node_modules 过期）。
+3. 上游 engines 现在要求 npm `<11.10.0 || >=11.17.0`，本机 npm 11.12.1 被 `.npmrc` 的 `engine-strict=true` 挡死。不想动全局 npm 就用 `npx -y npm@11.19.1 ci`（1342 packages / 44s）。
+4. `npm ci` 的 postinstall 会自动重打 assistant-ui 渲染环补丁；实测 `@assistant-ui/core@0.2.23` 上游**仍未修**（无 `shallowEqualOrUndefined`），`02a641c638` 的 workaround 继续有效。
+5. pytest 会在仓库根留下 `MagicMock/` 垃圾目录（本次已删）。
+
+### 遗留
+
+- `test_browser_real_profile.py::TestReviewRound3::test_relaunch_path_does_snapshot` fork 上稳定失败，未定性。
+- 未跟踪的 `firstread_C_todo.json` 是另一个项目（公众号策略数据）的文件误落在仓库根。
+- 分支 `fix/py-modules-state-holders` 经 `git cherry` 确认补丁已等价存在于 main，可删。
+
+---
+
 ## 2026-09-05: Desktop「无法启动」= 后端池超额订阅饥饿 + 撞锁静默退出（两个互不相干的静默失败）
 
 ### 症状
