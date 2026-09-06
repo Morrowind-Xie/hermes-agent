@@ -6,7 +6,13 @@ import { fileURLToPath } from 'node:url'
 
 import { test } from 'vitest'
 
-import { LocalBackendSpawnCoordinator, releaseLocalBackendSlotAfterExit } from './pool-spawn-coordinator'
+import {
+  decideLocalBackendAdmission,
+  isLocalBackendPoolSaturatedError,
+  localBackendPoolSaturatedMessage,
+  LocalBackendSpawnCoordinator,
+  releaseLocalBackendSlotAfterExit
+} from './pool-spawn-coordinator'
 
 const deferred = () => {
   let resolve!: () => void
@@ -342,3 +348,84 @@ test('setLimit rejects a non-positive or fractional cap', () => {
     assert.match(mainSource, /localBackendSpawnCoordinator\.setLimit\(poolLimits\.maxBackends\)/)
   })
 }
+
+// ── Admission policy ────────────────────────────────────────────────────────
+//
+// A lease is held for the lifetime of a RUNNING backend, so a workspace that
+// keeps more panes mounted than the cap demands leases the pool will never
+// release: LRU eviction spares every keepalive-fresh entry, and a mounted pane
+// pings its backend every 60s. The field case was three profiles sitting at
+// `3/3 busy` for three and a half hours, each attempt failing only after the
+// whole slot wait and never telling the user why. The verdict below is what
+// lets main refuse immediately instead.
+
+test('a spawn with a slot still free is admitted, not queued', () => {
+  assert.equal(
+    decideLocalBackendAdmission({ limit: 3, activeCount: 2, stoppingCount: 0, reclaimableCount: 0 }),
+    'acquire'
+  )
+})
+
+test('at cap with nothing able to free, the spawn is refused instead of made to wait', () => {
+  assert.equal(
+    decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 0, reclaimableCount: 0 }),
+    'saturated'
+  )
+})
+
+test('a backend already stopping makes the wait productive again', async () => {
+  // The lease releases once the child's exit is proven, so the queue can drain.
+  assert.equal(
+    decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 1, reclaimableCount: 0 }),
+    'wait'
+  )
+
+  // And the wait really does drain, end to end: a refused-then-freed slot.
+  const coordinator = new LocalBackendSpawnCoordinator(1)
+  const held = await coordinator.acquire('holder')
+  const waiter = coordinator.request('waiter', { timeoutMs: 50 })
+
+  held()
+  const released = await waiter.acquired
+  released()
+  assert.equal(coordinator.activeCount, 0)
+})
+
+test('a backend that eviction may reclaim makes the wait productive', () => {
+  assert.equal(
+    decideLocalBackendAdmission({ limit: 3, activeCount: 3, stoppingCount: 0, reclaimableCount: 1 }),
+    'wait'
+  )
+})
+
+test('a lowered cap over the running count is saturation while nothing can free', () => {
+  // setLimit never revokes a granted lease, so activeCount can exceed the cap.
+  // Being over cap is not the same as a queue that will drain.
+  assert.equal(
+    decideLocalBackendAdmission({ limit: 1, activeCount: 3, stoppingCount: 0, reclaimableCount: 0 }),
+    'saturated'
+  )
+})
+
+test('the saturation message names the cap and both fixes the user can apply', () => {
+  const message = localBackendPoolSaturatedMessage(4)
+
+  assert.match(message, /4 local backend slots are busy/)
+  assert.match(message, /pane/i)
+  assert.match(message, /Settings/)
+})
+
+test('main and the renderer agree on the verdict across the IPC boundary', () => {
+  // Electron serializes an ipcMain handler error down to its message, so the
+  // message text IS the contract. Producer and parser live in one module; this
+  // pins that they still agree, and that no other pool failure is swept in.
+  assert.equal(isLocalBackendPoolSaturatedError(new Error(localBackendPoolSaturatedMessage(3))), true)
+  assert.equal(isLocalBackendPoolSaturatedError(localBackendPoolSaturatedMessage(3)), true)
+  assert.equal(
+    isLocalBackendPoolSaturatedError(new Error('Local backend start for "x" timed out while waiting for a free slot.')),
+    false,
+    'a timeout means something WAS freeing — the fast transport clock stays right'
+  )
+  assert.equal(isLocalBackendPoolSaturatedError(new Error('Profile backend start for "x" was cancelled before spawn.')), false)
+  assert.equal(isLocalBackendPoolSaturatedError(undefined), false)
+})

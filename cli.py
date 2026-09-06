@@ -45,6 +45,7 @@ from hermes_cli.cli_model_switch_mixin import CLIModelSwitchMixin
 from hermes_cli.cli_voice_mixin import CLIVoiceMixin
 from hermes_cli.cli_status_bar_mixin import CLIStatusBarMixin
 from hermes_cli.cli_tui_mixin import CLITuiMixin
+from hermes_cli.cli_bridge_mixin import CLIBridgeMixin
 from agent.interrupt_compat import request_hard_interrupt
 from agent.pet import render as pet_render
 
@@ -2520,13 +2521,17 @@ class _ChatTurn:
     stop_event: Optional[threading.Event] = None
     tts_normal_exit: bool = False
     voice_prefix: str = ""
+    # Untruncated inbound text for the TUI→platform bridge mirror (the bridge
+    # sends "[TUI] 你：<msg>", which needs the message the user actually typed,
+    # including the multi-part/image-list form `chat()` accepts).
+    user_message: Any = None
 from hermes_cli.cli_chat_turn_mixin import CLIChatTurnMixin
 
 
 _PASTE_REF_RE = re.compile(r'\[Pasted text #\d+: \d+ lines \u2192 (.+?)\]')
 
 
-class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin):
+class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMixin, CLIStatusBarMixin, CLIVoiceMixin, CLIModelSwitchMixin, CLISessionMixin, CLIStreamMixin, CLIModalMixin, CLITerminalMixin, CLIInfoMixin, CLILoopsMixin, CLIChatTurnMixin, CLIBridgeMixin):
     """Interactive REPL for the Hermes Agent."""
 
     # Seeded -q first message (see _should_seed_interactive); run() re-creates
@@ -2918,6 +2923,13 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
         self._prompt_stash = _PromptStash()
         self.preloaded_skills: list[str] = []
         self._startup_skills_line_shown = False
+        # TUI ↔ messaging-platform bridge (hermes_cli/cli_bridge_mixin). State is
+        # per-process; the persisted half lives in bridge_subscription.json and is
+        # re-read at startup by _tui_print_startup.
+        self._bridge_platform: Optional[str] = None
+        self._bridge_chat_id: Optional[str] = None
+        self._bridge_inbox_stop: Optional["threading.Event"] = None  # signals inbox watcher to stop
+        self._bridge_progress_notified: bool = False  # True once we've sent a ⚙️ progress msg this turn
         # Background --skills preload, joined by finalize_preloaded_skills before any agent is built.
         self._preload_skills_thread: Optional[threading.Thread] = None
         self._preload_skills_result: Optional[tuple] = None
@@ -3695,6 +3707,44 @@ class HermesCLI(CLIAgentSetupMixin, CLICommandsMixin, CLIBillingMixin, CLITuiMix
             self._console_print(f"[bold {_accent_hex()}]Activated skills:[/] {', '.join(_skills_for_line)}")
             self._startup_skills_line_shown = True
         self._console_print()
+
+        # Auto-restore bridge: priority → subscription.json > config.yaml bridge: section
+        try:
+            import json as _json
+            _restored = False
+            _sub_path = self._bridge_subscription_path()
+            if _sub_path.exists():
+                _sub = _json.loads(_sub_path.read_text(encoding="utf-8"))
+                if _sub.get("platform") and _sub.get("chat_id"):
+                    self._bridge_platform = _sub["platform"]
+                    self._bridge_chat_id = _sub["chat_id"]
+                    _restored = True
+            if not _restored:
+                # Fall back to config.yaml bridge: section
+                try:
+                    import yaml as _yaml
+                    _cfg_path = get_hermes_home() / "config.yaml"
+                    if _cfg_path.exists():
+                        _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                        _br = _cfg.get("bridge", {})
+                        # Support both flat {platform, chat_id} and {default: {platform, chat_id}}
+                        if isinstance(_br, dict):
+                            _plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                            _cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                            if _plat and _cid:
+                                self._bridge_platform = _plat
+                                self._bridge_chat_id = _cid
+                                _restored = True
+                except Exception:
+                    pass
+            if _restored:
+                self._console_print(
+                    f"  [dim]Bridge auto-restored → {self._bridge_platform}:{self._bridge_chat_id} "
+                    f"(use /bridge off to detach)[/dim]"
+                )
+                self._bridge_start_inbox_watcher()
+        except Exception:
+            pass  # non-critical, never block startup
 
     def _tui_startup_prewarm_and_warnings(self, _welcome_skin):
         """Idle-window prewarms (picker cache, agent runtime imports) plus the redaction-off and OpenClaw-residue banners."""

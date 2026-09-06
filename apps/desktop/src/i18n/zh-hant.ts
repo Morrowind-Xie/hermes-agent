@@ -84,7 +84,10 @@ export const zhHant = defineLocale({
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: '需要閘道登入',
-      ipcBridgeUnavailable: '桌面 IPC 橋接器不可用。'
+      ipcBridgeUnavailable: '桌面 IPC 橋接器不可用。',
+      localBackendPoolSaturated: '已達本地 Agent 上限',
+      localBackendPoolSaturatedDetail:
+        '所有本地後端槽位都已被你開啟的 profile 佔用。關閉另一個機器人面板，或在「設定 → 進階」中提高上限，然後重新開啟該機器人。'
     },
     failure: {
       title: 'Hermes 無法啟動',

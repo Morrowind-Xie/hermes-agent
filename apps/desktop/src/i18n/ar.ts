@@ -99,7 +99,10 @@ export const ar = defineLocale({
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'تسجيل الدخول للبوابة مطلوب',
-      ipcBridgeUnavailable: 'جسر IPC لسطح المكتب غير متاح.'
+      ipcBridgeUnavailable: 'جسر IPC لسطح المكتب غير متاح.',
+      localBackendPoolSaturated: 'تم بلوغ حد الوكلاء المحليين',
+      localBackendPoolSaturatedDetail:
+        'جميع فتحات الخلفية المحلية مشغولة بملفات أنت مفتوحها بالفعل. أغلق لوحة bots أخرى، أو ارفع الحد من الإعدادات → متقدم، ثم افتح هذا الروبوت مجددًا.'
     },
     failure: {
       title: 'تعذر تشغيل Hermes',

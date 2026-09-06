@@ -704,6 +704,18 @@ class CLIStreamMixin:
             self._pending_tool_info.setdefault(function_name, []).append(
                 function_args if function_args is not None else {})
             self._invalidate()
+            # Bridge progress: send a single ⚙️ notification to the bridged platform
+            # on the first tool call of this turn (avoid flooding with one msg per tool).
+            if (
+                self._bridge_platform
+                and self._bridge_chat_id
+                and not self._bridge_progress_notified
+            ):
+                self._bridge_progress_notified = True
+                try:
+                    self._bridge_send(f"⚙️ {get_tool_emoji(function_name)} {label}...")
+                except Exception:
+                    pass
 
     def _on_tool_start(self, tool_call_id: str, function_name: str, function_args: dict):
         """Capture local before-state for write-capable tools."""

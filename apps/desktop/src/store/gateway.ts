@@ -3,10 +3,17 @@ import { atom } from 'nanostores'
 
 import type { HermesConnection } from '@/global'
 import { HermesGateway, setApiRequestConnection } from '@/hermes'
+import { translateNow } from '@/i18n'
 import { reconnectBackoffDelayMs } from '@/lib/reconnect-backoff'
 import { RECONNECT_ATTEMPT_TIMEOUT_MS, withTimeout } from '@/lib/with-timeout'
+import { notify } from '@/store/notifications'
 import { markNativeNotifyBaseline } from '@/store/notify-baseline'
 import { setConnection, setGatewayState } from '@/store/session'
+
+// Shared with Electron main: the saturation verdict is produced there, and an
+// Error's message is all that survives the IPC handler boundary, so the
+// classifier lives beside the producer — one module, no drift possible.
+import { isLocalBackendPoolSaturatedError } from '../../electron/pool-spawn-coordinator'
 
 // ── Multi-profile gateway routing ──────────────────────────────────────────
 // Concurrent sessions across profiles need concurrent sockets: the renderer's
@@ -110,12 +117,38 @@ interface Secondary {
    * an orphaned lease self-heals.
    */
   activationLeaseUntil: number
+  /**
+   * The local backend pool refused this entry's spawn for lack of a free slot,
+   * and nothing in the pool can free one: slows the retry clock (see
+   * POOL_SATURATION_RETRY_MS). Both saturation flags clear when a dial gets
+   * through, so a later episode slows again and explains itself again.
+   */
+  poolSaturated: boolean
+  /**
+   * The saturation has been explained to the user. This cannot be folded into
+   * `poolSaturated`: a user-initiated switch sets that flag (its own caller
+   * shows the raw error), and sharing one flag would leave the background loop
+   * permanently silent — a pane sitting unusable with no reason anywhere, the
+   * exact failure this path exists to remove.
+   */
+  saturationAnnounced: boolean
 }
 
 // How long a mid-dial activation holds its prune lease: covers a cold pool
 // backend spawn + socket connect with margin, while still letting a leaked
 // lease expire quickly enough for the reaper to reclaim the entry.
 const ACTIVATION_LEASE_MS = 30_000
+
+// How long a secondary whose local backend the pool refused for lack of a slot
+// waits before re-asking, plus a spread so several saturated panes don't wake in
+// lockstep. The transport backoff is wrong here for two reasons: it is wrong in
+// kind (nothing transient is about to fix itself — only the user closing a pane
+// or raising the cap changes the state), and it cannot be fixed by raising its
+// cap, because full jitter ramps from a 300ms base and the shared 15s ceiling is
+// what produced the observed 2-8s-per-retry loop. A fixed slow interval is both
+// honest and cheap.
+const POOL_SATURATION_RETRY_MS = 60_000
+const POOL_SATURATION_RETRY_SPREAD_MS = 30_000
 
 // ── HMR-stable module state ─────────────────────────────────────────────────
 // All mutable singletons (live sockets, active-profile routing, the event
@@ -582,6 +615,11 @@ async function openSecondary(entry: Secondary): Promise<void> {
       throw error
     }
 
+    // The pool served us: restore the transport clock and let a future
+    // saturation episode explain itself again.
+    entry.poolSaturated = false
+    entry.saturationAnnounced = false
+
     entry.openedOnce = true
     openedScopes.add(entry.scope)
 
@@ -616,14 +654,45 @@ async function openSecondary(entry: Secondary): Promise<void> {
   }
 }
 
+/**
+ * Remember that this entry's dial was refused because the local backend pool is
+ * full, which slows its retry clock (POOL_SATURATION_RETRY_CAP_MS) instead of
+ * re-paying a provably-doomed spawn on the transport backoff every 15 seconds.
+ *
+ * `announce` belongs to the background retry loop only: a user-initiated switch
+ * already surfaces the failure through its own caller, and telling it twice
+ * turns one saturated pane into two toasts.
+ */
+function notePoolSaturation(entry: Secondary, error: unknown, { announce }: { announce: boolean }): void {
+  if (!isLocalBackendPoolSaturatedError(error)) {
+    return
+  }
+
+  entry.poolSaturated = true
+
+  if (announce && !entry.saturationAnnounced) {
+    entry.saturationAnnounced = true
+
+    notify({
+      kind: 'error',
+      title: translateNow('boot.errors.localBackendPoolSaturated'),
+      message: translateNow('boot.errors.localBackendPoolSaturatedDetail')
+    })
+  }
+}
+
 function scheduleReconnect(entry: Secondary): void {
   if (entry.reconnecting || entry.reconnectTimer !== null || !entry.wantOpen) {
     return
   }
 
   // Full-jitter exponential backoff — same shape (and same reason: avoid a
-  // reconnect storm against a restarting gateway) as the primary's.
-  const delay = reconnectBackoffDelayMs(entry.reconnectAttempt)
+  // reconnect storm against a restarting gateway) as the primary's. A pool
+  // saturation is a different kind of failure and gets its own slow clock.
+  const delay = entry.poolSaturated
+    ? POOL_SATURATION_RETRY_MS + Math.random() * POOL_SATURATION_RETRY_SPREAD_MS
+    : reconnectBackoffDelayMs(entry.reconnectAttempt)
+
   entry.reconnectAttempt += 1
   entry.reconnectTimer = setTimeout(() => {
     entry.reconnectTimer = null
@@ -642,6 +711,9 @@ async function reconnectSecondary(entry: Secondary): Promise<void> {
     await openSecondary(entry)
     entry.reconnectAttempt = 0
   } catch (error) {
+    // A background retry owns the explanation — the user is not waiting on it.
+    notePoolSaturation(entry, error, { announce: true })
+
     // The registry no longer knows this connection (removed while we were
     // backing off), or Electron's deletion guard reports the profile itself
     // gone/mid-delete. Both are permanent for this scoped socket — retrying
@@ -711,7 +783,9 @@ function createSecondary(profile: string, connectionId: null | string = null): S
     retained: false,
     relayRetainCount: 0,
     wantOpen: true,
-    activationLeaseUntil: 0
+    activationLeaseUntil: 0,
+    poolSaturated: false,
+    saturationAnnounced: false
   }
 
   // Events keep carrying the bare profile — session routing is profile-keyed
@@ -1498,6 +1572,9 @@ export async function ensureGatewayForProfile(profile: string): Promise<void> {
         // but RE-THROW so the profile-door caller surfaces the failure and skips
         // the activation. The agent-door twin (ensureGatewayForAgent) keeps its
         // boolean contract and is guarded by the activeGateway() null invariant.
+        // Slow the retry clock when the refusal was the pool having no slot to
+        // give. No toast from here: the rethrown error is the user's feedback.
+        notePoolSaturation(entry, error, { announce: false })
         scheduleReconnect(entry)
         throw error
       }

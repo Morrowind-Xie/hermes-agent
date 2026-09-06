@@ -84,7 +84,10 @@ export const ja = defineLocale({
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: 'ゲートウェイへのサインインが必要です',
-      ipcBridgeUnavailable: 'デスクトップ IPC ブリッジが利用できません。'
+      ipcBridgeUnavailable: 'デスクトップ IPC ブリッジが利用できません。',
+      localBackendPoolSaturated: 'ローカルエージェントの上限に達しました',
+      localBackendPoolSaturatedDetail:
+        'すべてのローカルバックエンスロットは既に開いているプロファイルで占有されています。別のボットペインを閉じるか、設定 → 詳細 で上限を上げてから、このボットを開き直してください。'
     },
     failure: {
       title: 'Hermes を起動できませんでした',

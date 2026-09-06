@@ -70,6 +70,9 @@ class CLIChatTurnMixin:
         print(flush=True)
 
         turn = _ChatTurn()
+        # The bridge mirror reports what the user actually typed, in its original
+        # shape (str or multimodal list) — `_chat_render_turn` has no `message`.
+        turn.user_message = message
         try:
             self._reset_stream_state()
             # Not part of _reset_stream_state: must persist across intermediate turn
@@ -460,6 +463,38 @@ class CLIChatTurnMixin:
         """
         from cli import _DIM, _RST, _cprint, _suspend_output_history
         response = turn.result.get("final_response", "") if turn.result else ""
+
+        # Bridge sync: mirror completed TUI conversation to bridged platform.
+        if (
+            self._bridge_platform
+            and self._bridge_chat_id
+            and response
+            and not (turn.result and (turn.result.get("failed") or turn.result.get("partial") or turn.result.get("interrupted")))
+        ):
+            try:
+                from cli import logger
+                _msg = turn.user_message
+                if isinstance(_msg, str):
+                    _user_text = _msg.strip()
+                elif isinstance(_msg, list):
+                    _parts = [b.get("text", "") for b in _msg if isinstance(b, dict) and b.get("type") == "text"]
+                    _user_text = " ".join(_parts).strip()
+                    if any(b.get("type") in ("image_url", "image") for b in _msg if isinstance(b, dict)):
+                        _user_text = (_user_text + " [含图片]").strip()
+                else:
+                    _user_text = ""
+                # TUI takeover mode: message originated from WeChat.
+                # Only send the AI reply (no user echo, no [TUI] prefix).
+                _from_weixin = _user_text.startswith("[来自微信的消息]")
+                if _from_weixin:
+                    self._bridge_send(response)
+                else:
+                    if _user_text:
+                        self._bridge_send(f"[TUI] 你：{_user_text}")
+                    self._bridge_send(f"[TUI] Hermes：{response}")
+            except Exception as _be:
+                logging.debug("bridge forward error: %s", _be)
+
         # "failed"/"partial" with an empty final_response: no usable answer.
         if turn.result and (turn.result.get("failed") or turn.result.get("partial")) and not response:
             response = f"Error: {turn.result.get('error', 'Unknown error')}"

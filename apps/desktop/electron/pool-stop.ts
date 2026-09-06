@@ -38,6 +38,8 @@ export interface PoolStopperDeps {
 export interface PoolStopper {
   /** The in-flight stop for a key, if any — await before respawning it. */
   inFlight: (key: string) => Promise<void> | undefined
+  /** How many stops are in flight right now (their leases free on exit). */
+  stoppingCount: () => number
   /** Stop one pooled backend; concurrent calls share the same promise. */
   stop: (key: string) => Promise<void>
   /** Stop every pooled backend currently in the pool. */
@@ -78,6 +80,7 @@ export function createPoolStopper(deps: PoolStopperDeps): PoolStopper {
 
   return {
     inFlight: key => stops.get(key),
+    stoppingCount: () => stops.size,
     stop,
     stopAll: async () => {
       await Promise.all([...deps.pool.keys()].map(stop))

@@ -1471,12 +1471,37 @@ class GatewayTurnMixin:
             logger.debug("runtime_footer build failed: %s", _footer_err)
             return ""
 
-    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response):
-        """agent:end hook, process-watcher scheduling, and watch-notification drain."""
+    async def _hmwa_post_turn_hooks(self, hook_ctx, agent_result, response, bridge_user_msg: str = ""):
+        """agent:end hook, process-watcher scheduling, and watch-notification drain.
+
+        `bridge_user_msg` is the untruncated inbound text for the TUI bridge inbox:
+        hook_ctx["message"] is capped at 500 chars for hook payloads, and a mirrored
+        conversation must not silently lose the rest of the user's message.
+        """
         await self.hooks.emit("agent:end", {
             **hook_ctx, "response": (response or "")[:500], "model": agent_result.get("model", ""),
             "provider": agent_result.get("provider", ""),
         })
+
+        # Bridge inbox: write completed exchange to bridge_inbox.jsonl so that
+        # a running TUI CLI can display a notification for this gateway message.
+        try:
+            from hermes_constants import get_hermes_home as _ghh
+            import json as _json
+            import time as _time
+            _inbox = _ghh() / "bridge_inbox.jsonl"
+            if _inbox.exists() or (_ghh() / "bridge_subscription.json").exists():
+                _entry = {
+                    "ts": _time.time(),
+                    "platform": hook_ctx.get("platform", ""),
+                    "chat_id": hook_ctx.get("chat_id", ""),
+                    "user_msg": bridge_user_msg or hook_ctx.get("message", ""),
+                    "response": response or "",
+                }
+                with _inbox.open("a", encoding="utf-8") as _f:
+                    _f.write(_json.dumps(_entry, ensure_ascii=False) + "\n")
+        except Exception as _bridge_err:
+            logger.debug("bridge inbox write error: %s", _bridge_err)
 
         # Pending process watchers (check_interval on background processes)
         try:
@@ -1927,6 +1952,81 @@ class GatewayTurnMixin:
             (getattr(event, "reply_to_text", None) or "")[:80].replace("\n", " "),
         )
 
+        # TUI bridge takeover: if a TUI bridge subscription is active for this
+        # platform + chat_id, write the message to bridge_inbox.jsonl and return
+        # immediately so that the TUI handles the AI response (avoiding double replies).
+        try:
+            import json as _json_bridge
+            from hermes_constants import get_hermes_home as _ghh_bridge
+            import time as _time_bridge
+            _sub_path = _ghh_bridge() / "bridge_subscription.json"
+            _inbox_path = _ghh_bridge() / "bridge_inbox.jsonl"
+            _tui_takeover = False
+            if _sub_path.exists():
+                try:
+                    _sub = _json_bridge.loads(_sub_path.read_text(encoding="utf-8"))
+                    _sub_plat = str(_sub.get("platform") or "").strip().lower()
+                    _sub_cid = str(_sub.get("chat_id") or "").strip()
+                    if _sub_plat == _platform_name.lower() and _sub_cid == (source.chat_id or ""):
+                        _tui_takeover = True
+                except Exception:
+                    pass
+            if not _tui_takeover:
+                # Also check config.yaml bridge: section
+                try:
+                    import yaml as _yaml_bridge
+                    _cfg_path = _ghh_bridge() / "config.yaml"
+                    if _cfg_path.exists():
+                        _cfg_b = _yaml_bridge.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
+                        _br = _cfg_b.get("bridge", {})
+                        if isinstance(_br, dict):
+                            _br_plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                            _br_cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                            if _br_plat == _platform_name.lower() and _br_cid == (source.chat_id or ""):
+                                _tui_takeover = True
+                except Exception:
+                    pass
+            if _tui_takeover and event.text:
+                # Verify TUI is actually running by checking the heartbeat file.
+                # The TUI bridge watcher refreshes bridge_heartbeat.json every 2 seconds.
+                # If last_seen is older than 10 seconds, TUI is offline → fall back to
+                # gateway AI so the message is not silently dropped.
+                _hb_path = _ghh_bridge() / "bridge_heartbeat.json"
+                _tui_alive = False
+                try:
+                    if _hb_path.exists():
+                        _hb = _json_bridge.loads(_hb_path.read_text(encoding="utf-8"))
+                        _hb_age = _time_bridge.time() - float(_hb.get("last_seen", 0))
+                        _tui_alive = _hb_age < 10.0
+                except Exception:
+                    pass
+                if not _tui_alive:
+                    logger.info(
+                        "[Gateway] TUI bridge takeover: TUI offline (heartbeat absent or stale), "
+                        "falling back to gateway AI for message from %s",
+                        source.chat_id or "unknown",
+                    )
+                    _tui_takeover = False
+            if _tui_takeover and event.text:
+                # Write to inbox so TUI picks it up and runs the AI + sends reply back
+                _entry = {
+                    "ts": _time_bridge.time(),
+                    "platform": _platform_name,
+                    "chat_id": source.chat_id or "",
+                    "user_msg": event.text,
+                    "response": "",  # TUI will generate the response
+                    "tui_takeover": True,
+                }
+                with _inbox_path.open("a", encoding="utf-8") as _f:
+                    _f.write(_json_bridge.dumps(_entry, ensure_ascii=False) + "\n")
+                logger.info(
+                    "[Gateway] TUI bridge takeover: forwarded message from %s to TUI inbox (skipping gateway AI)",
+                    source.chat_id or "unknown",
+                )
+                return None
+        except Exception as _bridge_check_err:
+            logger.debug("bridge takeover check failed (non-fatal): %s", _bridge_check_err)
+
         resolved = await self._hmwa_resolve_session(event, source)
         if resolved is None:
             return
@@ -1982,7 +2082,7 @@ class GatewayTurnMixin:
             # Streaming already delivered the body: the footer goes out as a trailing send instead.
             if _footer_line and response and not agent_result.get("already_sent") and not _intentional_silence:
                 response = f"{response}\n\n{_footer_line}"
-            await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response)
+            await self._hmwa_post_turn_hooks(hook_ctx, agent_result, response, bridge_user_msg=message_text)
 
             agent_failed_early, hidden_reasoning_incomplete, is_context_overflow_failure = (
                 self._hmwa_classify_turn_failure(agent_result, history, session_entry)

@@ -5931,6 +5931,19 @@ def _build_call_kwargs(
     base_url: Optional[str] = None, task: Optional[str] = None,
 ) -> dict:
     """Build kwargs for .chat.completions.create() with model/provider adjustments."""
+    # Strip DeepSeek/Kimi thinking-mode fields that are never valid for an
+    # auxiliary provider (OpenRouter, Nous, custom endpoints). When the main
+    # agent runs in DeepSeek thinking mode every assistant message carries
+    # reasoning_content=""; forwarding it verbatim 400s with
+    # "The reasoning_content in the thinking mode must be passed back to the
+    # API." Auxiliary tasks always use a standard chat-completions provider, so
+    # the field must go before the call (#15250).
+    messages = [
+        {k: v for k, v in m.items() if k != "reasoning_content"}
+        if isinstance(m, dict) and m.get("role") == "assistant" and "reasoning_content" in m
+        else m
+        for m in messages
+    ]
     kwargs: Dict[str, Any] = {"model": model, "messages": messages, "timeout": timeout}
     # Per-model fixed/omitted temperature, then Opus 4.7+ sampling bans: it rejects any
     # non-default temperature/top_p/top_k, so drop silently rather than 400 when the aux model flips.

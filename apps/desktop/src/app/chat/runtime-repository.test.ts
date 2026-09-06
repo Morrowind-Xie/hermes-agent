@@ -195,3 +195,93 @@ describe('useRuntimeMessageRepository', () => {
     ])
   })
 })
+
+/**
+ * Identity contract — the load-bearing property the render-loop guard depends on.
+ *
+ * ChatRuntimeBoundary passes a fresh adapter literal on every render, and
+ * `IncrementalExternalStoreThreadRuntimeCore.__internal_setAdapter` decides
+ * "nothing observable changed" by comparing `messageRepository` BY REFERENCE
+ * (see src/lib/incremental-external-store-runtime.ts). A repository that is
+ * content-identical but a new object therefore fails that gate, falls through
+ * to the full sync path, and notifies UNCONDITIONALLY — which is the
+ * "Maximum update depth exceeded. The result of getSnapshot should be cached"
+ * crash that takes the whole workspace pane down behind its error boundary.
+ *
+ * So this hook must preserve reference identity on no-op re-runs, exactly like
+ * `stabilizeItems` does for $statusItemsBySession.
+ */
+describe('useRuntimeMessageRepository reference identity', () => {
+  const branch = (id: string): ChatMessage => ({
+    ...text(id, 'assistant', 'branch'),
+    branchGroupId: 'group-1'
+  })
+
+  function renderWith(messages: ChatMessage[]) {
+    return renderHook(({ input }: { input: ChatMessage[] }) => useRuntimeMessageRepository(input), {
+      initialProps: { input: messages }
+    })
+  }
+
+  it('keeps the repository reference when the array is rebuilt with the same messages', () => {
+    const messages = [text('user-1', 'user', 'hi'), text('assistant-1', 'assistant', 'hello')]
+    const { result, rerender } = renderWith(messages)
+    const first = result.current
+
+    // A new array identity with identical elements: the memo re-runs, but the
+    // derived repository is unchanged, so it must come back as the SAME object.
+    rerender({ input: [...messages] })
+
+    expect(result.current).toBe(first)
+  })
+
+  it('keeps the reference across repeated no-op re-renders (the loop shape)', () => {
+    const messages = [text('user-1', 'user', 'hi'), branch('a-1'), branch('a-2')]
+    const { result, rerender } = renderWith(messages)
+    const first = result.current
+
+    // Five boundary re-renders — the shape the guard test in
+    // incremental-runtime-adapter-notify.test.ts feeds the adapter gate.
+    for (let render = 0; render < 5; render += 1) {
+      rerender({ input: [...messages] })
+
+      expect(result.current).toBe(first)
+    }
+  })
+
+  it('returns a fresh repository when the transcript actually grows', () => {
+    const messages = [text('user-1', 'user', 'hi')]
+    const { result, rerender } = renderWith(messages)
+    const first = result.current
+
+    rerender({ input: [...messages, text('assistant-1', 'assistant', 'hello')] })
+
+    expect(result.current).not.toBe(first)
+    expect(result.current.messages.map(item => item.message.id)).toEqual(['user-1', 'assistant-1'])
+  })
+
+  it('returns a fresh repository when a message is edited in place', () => {
+    const firstTurn = text('assistant-1', 'assistant', 'hello')
+    const messages = [text('user-1', 'user', 'hi'), firstTurn]
+    const { result, rerender } = renderWith(messages)
+    const first = result.current
+
+    // Streaming: the same id arrives as a NEW object with new content, so the
+    // converted ThreadMessage differs and the repository must be rebuilt.
+    rerender({ input: [messages[0], text('assistant-1', 'assistant', 'hello there')] })
+
+    expect(result.current).not.toBe(first)
+  })
+
+  it('returns a fresh repository when the head moves', () => {
+    const messages = [text('user-1', 'user', 'hi'), text('assistant-1', 'assistant', 'a'), text('assistant-2', 'assistant', 'b')]
+    const { result, rerender } = renderWith(messages)
+    const first = result.current
+
+    // Same message set, different head: branch switching must still notify.
+    rerender({ input: [messages[0], messages[2], messages[1]] })
+
+    expect(result.current).not.toBe(first)
+    expect(result.current.headId).not.toBe(first.headId)
+  })
+})

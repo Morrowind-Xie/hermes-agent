@@ -101,7 +101,10 @@ export const ru = defineLocale({
       desktopBootFailed: 'Не удалось запустить приложение',
       gatewayConnectionLost: 'Соединение с шлюзом потеряно',
       gatewaySignInRequired: 'Требуется вход в шлюз',
-      ipcBridgeUnavailable: 'IPC-мост приложения недоступен.'
+      ipcBridgeUnavailable: 'IPC-мост приложения недоступен.',
+      localBackendPoolSaturated: 'Достигнут лимит локальных агентов',
+      localBackendPoolSaturatedDetail:
+        'Все локальные слоты бэкенда заняты уже открытыми профилями. Закройте другую панель бота или увеличьте лимит в Настройки → Дополнительно, затем снова откройте этого бота.'
     },
     failure: {
       title: 'Hermes не удалось запустить',
