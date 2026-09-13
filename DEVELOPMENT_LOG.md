@@ -4,6 +4,36 @@
 
 ---
 
+## 2026-09-13: 上游同步至 de2d6a1b93（164 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **164** 个提交（上次同步 2026-09-12 23:54，上游不到一天又推了一批）、领先 53 个（本地私有工作）。317 files / +5279 −1274，集中在 `hermes_cli`（47）、`agent`（16）、`gateway`（12）、`tools`（10）及其测试。
+
+### 流程
+
+工作区干净 → 直接 `merge origin/main`（093cbc34f8）→ **零冲突** → 验证 → 重建 web 前端。
+
+### 上游要点
+
+- fix(config)：新进程恢复上次完好的 config.yaml，不再退回默认值（LKG backup）
+- fix(model)：选定 model id 不再被改写成目录相邻模型
+- feat(video)：OpenRouter 视频后端覆盖全目录 + Hailuo 3 Max（新插件 `plugins/video_gen/openrouter/`）
+- kanban 改为按平台显式 opt-in（`hermes tools enable kanban --platform X`，新增 `tools/kanban_toolset_context.py`）
+- cron：systemd user scope 不可用时优雅降级；heartbeat 不再在 `save_jobs` 期间持有 fire fence
+- fix(codex)：summary 调用剥离 tool controls；fix(mcp)：工具错误打开的 breaker 报 "rejected" 而非 "unreachable"
+- multiplex：served profile 的 api_server/webhook 以 `/p/<profile>/` URL 上报（`_mark_connected(listener_base=...)`）
+
+### 验证
+
+- 零冲突；`git diff` 证实 `gateway/platforms/weixin.py` 本次未被上游触碰；本地自有提交（微信桥接 f97f2ac603、desktop 池修复 426ef1dea2、auxiliary 修复 267688b48d）全部仍在 HEAD 祖先内。本地代理修复已由 `proxy=None` 进化为 `base.py` 的 `gateway_trust_env()` 机制，`gateway_trust_env()` 返回 True，合并未触及。
+- Import 冒烟：`run_agent` / `model_tools` / `toolsets` / `cli` / `hermes_state` / `gateway.run` 全部 OK。
+- `scripts/run_tests.sh tests/gateway/test_weixin.py tests/tools/test_kanban_toolset_opt_in.py` → 37✓ 0✗（本地桥接 32✓ + 上游新增 kanban opt-in 5✓）。
+- `package.json` / `package-lock.json` 无变化，无需 `npm ci`；`web/src` 9 文件有变 → 已重建 `hermes_cli/web_dist`（vite build 3.92s），避免 WebUI 用旧前端。
+
+---
+
+## 2026-09-06: 上游同步至 96ed0e71ea（4403 → 0）+ `cmd_gui` 搬家导致的修复落点重放
 ## 2026-09-06: 上游同步至 96ed0e71ea（4403 → 0）+ `cmd_gui` 搬家导致的修复落点重放
 
 ### 背景
