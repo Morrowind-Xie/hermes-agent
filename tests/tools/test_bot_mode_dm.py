@@ -16,7 +16,7 @@ from pathlib import Path
 
 import pytest
 
-from tools import bot_mode_dm, bot_mode_probe
+from tools import bot_mode_dm, bot_mode_probe, bot_relay
 
 
 @pytest.fixture(autouse=True)
@@ -234,6 +234,9 @@ def _runner_author(command):
 
 def test_local_delivery_command_and_ack(tmp_path, monkeypatch):
     calls = _capture_spawn(monkeypatch)
+    # These assertions target the -p/turn-args shape; pin the entrypoint resolution
+    # so the test stays hermetic across venvs that do/don't expose a sibling script.
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
     home = _managed_home(tmp_path, teammates=("researcher",))
     agent = _FakeAgent(home, title="Bot Chat")
 
@@ -295,6 +298,7 @@ def test_peer_delivery_command_pins_registry_profile_for_secondary_bots(
     tool-side roster (read from the machine-root config) validated the
     target."""
     calls = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
     home = _managed_home(tmp_path, peers=("spark",))
     # A reviewer-profile gateway context: the agent's session db lives under
     # that profile's home, so _agent_home() resolves there while the
@@ -316,6 +320,7 @@ def test_peer_delivery_command_pins_registry_profile_for_secondary_bots(
 
 def test_peer_delivery_command(tmp_path, monkeypatch):
     calls = _capture_spawn(monkeypatch)
+    monkeypatch.setattr(bot_relay, "_hermes_cli", lambda: "hermes")
     monkeypatch.setattr("socket.gethostname", lambda: "eri-mac.local")
     home = _managed_home(tmp_path, peers=("spark",))
     agent = _FakeAgent(home, title="Bot Chat")
@@ -339,6 +344,40 @@ def test_peer_delivery_command(tmp_path, monkeypatch):
     mode, _dm_file, transport_argv = _runner_parts(calls[1]["command"])
     assert mode == "stdin"
     assert transport_argv == ["hermes", "-p", "default", "peer", "dm", "spark"]
+
+
+def test_delivery_pins_the_hermes_entrypoint_beside_this_interpreter(tmp_path, monkeypatch):
+    """A background delivery must not rely on PATH: the runner's service context
+    lacks the gateway's venv bin dir, so a bare ``hermes`` resolves to a system
+    install whose shebang picks the wrong interpreter and dies on import (#108628).
+    Both transports must invoke the entrypoint beside this interpreter instead."""
+    venv_bin = tmp_path / "venv" / ("Scripts" if sys.platform == "win32" else "bin")
+    venv_bin.mkdir(parents=True)
+    hermes_entry = venv_bin / ("hermes.exe" if sys.platform == "win32" else "hermes")
+    hermes_entry.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(sys, "executable", str(venv_bin / "python3"))
+
+    calls = _capture_spawn(monkeypatch)
+    home = _managed_home(tmp_path, teammates=("researcher",), peers=("spark",))
+    agent = _FakeAgent(home, title="Bot Chat")
+
+    result = json.loads(
+        bot_mode_dm.message_agent_tool(target="researcher", message="ping", agent=agent)
+    )
+    assert result["status"] == "sent"
+    mode, _dm_file, transport_argv = _runner_parts(calls[0]["command"])
+    assert mode == "query-file"
+    assert transport_argv[0] == str(hermes_entry)
+    assert transport_argv[1:] == ["-p", "researcher", "chat", "--in", "~", "-c", "Bot Chat",
+                                  "--create-if-missing", "-Q"]
+
+    result2 = json.loads(
+        bot_mode_dm.message_agent_tool(target="spark", message="ping", agent=agent)
+    )
+    assert result2["status"] == "sent"
+    mode, _dm_file, transport_argv = _runner_parts(calls[1]["command"])
+    assert mode == "stdin"
+    assert transport_argv == [str(hermes_entry), "-p", "default", "peer", "dm", "spark"]
 
 
 def test_peer_delivery_author_carries_the_sender_hostname_and_local_stays_bare(tmp_path, monkeypatch):
@@ -552,6 +591,22 @@ def test_delivery_runner_surfaces_live_owner_refusal(tmp_path, capsys):
     payload = json.loads(capsys.readouterr().out)
     assert payload["reason"] == "target_busy"
     assert "NOT delivered" in payload["error"]
+
+
+def test_local_turn_reemits_empty_stdout_for_a_bare_silence_marker(tmp_path, capsys):
+    """#110782: the one-shot ``hermes chat -c "Bot Chat"`` transport applies the gateway's
+    silence rule — a successful bare marker reaches the sender as "", prose stays verbatim."""
+    dm_file = tmp_path / "message.txt"
+    dm_file.write_text("thanks, bye", encoding="utf-8")
+    child = tmp_path / "quiet.py"
+    child.write_text("import sys\nprint(sys.argv[1])\n", encoding="utf-8")
+
+    assert bot_mode_dm._run_local_turn([sys.executable, str(child), "NO_REPLY"], str(dm_file)) == 0
+    assert capsys.readouterr().out == ""
+
+    prose = "The NO_REPLY marker means do not answer."
+    assert bot_mode_dm._run_local_turn([sys.executable, str(child), prose], str(dm_file)) == 0
+    assert capsys.readouterr().out.strip() == prose
 
 
 def test_query_file_delivery_closes_stdin_for_initial_attempt_and_retry(
