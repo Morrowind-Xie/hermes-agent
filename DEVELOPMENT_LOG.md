@@ -4,6 +4,39 @@
 
 ---
 
+## 2026-09-15: 上游同步至 b3feb88a95（1366 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **1366** 个提交（分叉点 `de2d6a1b93`，即 09-13 同步的上游 tip；上游 09-13/14/15 分别推了 471/254/561 个提交，处于高强度迭代期）、领先 55 个（本地私有工作）。总量 3003 files / +163009 −33902。新 tag `v2026.9.14`（v0.21.3；desktop package 0.17.2 → 0.17.3，仅版本号，无需 `npm ci`）。
+
+### 流程
+
+工作区干净 → `merge origin/main`（4af71a7107）→ **3 个冲突**，全部手工解决：
+
+- `cli.py`：`HermesCLI.__init__` 同一位置两边各自新增属性 → 并存（本地 bridge 四属性 + 上游 `_auto_load_skills_result`）。
+- `apps/desktop/src/i18n/en.ts`：采用上游新文案/新 key（`reconnectNow`、`connectionSettings`、`gatewaySignInRequiredDetail`、`signInAgain`、`causes` classifyBootFailure 块），保留本地 `localBackendPoolSaturated(Detail)` 两 key（desktop 池饱和修复的 UI 文案）；`ipcBridgeUnavailable` 补尾逗号。
+- `apps/desktop/src/store/gateway.ts`：上游把 `reconnectBackoffDelayMs` 移入 `@hermes/shared` 并删除 `@/lib/reconnect-backoff` → 丢弃旧 import（模块已不存在，顶部 `@hermes/shared` import 已含该符号），保留本地 `translateNow` import。本地 pool-saturation 逻辑（`poolSaturated`/`saturationAnnounced`/`notePoolSaturation`/60s+抖动慢重试时钟）auto-merge 完整保留，仅 `scheduleReconnect` 里改用 shared 的 backoff 符号。
+
+### 上游要点
+
+- Bot Mode / TUI：silence marker 抑制、Bot Chat 流式 delta 修正、session-store title 读取跳过
+- fix(config)：所有 config.yaml stat 缓存统一为 `file_signature`（inode + ctime，可检测文件替换）
+- fix(redact)：secret 文件的备份拷贝与赋值行掩码；docs(security) 同步
+- cron / systemd：scoped worker 用户总线丢失时点名原因并重探；scope 可用性重校验；flat install 忽略规则
+- kanban：`create-with-parents` 与 link 同样门控（archived parent 终态）；dashboard 上报 gate
+- 终端渲染：行号 gutter 锚点、`cat -n`/grep 上下文 gutter 修复
+
+### 验证
+
+- 冲突标记清零；`py_compile cli.py` ✓；`tsc --noEmit -p apps/desktop` ✓（0 错误）。
+- Import 冒烟：`run_agent` / `model_tools` / `toolsets` / `cli` / `hermes_state` / `gateway.run` 全部 OK（临时 `HERMES_HOME`）。
+- `scripts/run_tests.sh tests/gateway/test_weixin.py` → 32✓ 0✗；`tests/hermes_cli/test_config.py + test_cli_mcp_config_watch.py` → 132✓ 0✗（4 skipped，上游 stat 缓存改动面）。
+- desktop `vitest run src/i18n` → 31✓（4 文件，验证 en.ts 合并后各语言 key 集合完整）。
+- `web/src` 60 文件有变 → 已重建 `hermes_cli/web_dist`（vite build 4.21s）。
+
+---
+
 ## 2026-09-13: 上游同步至 de2d6a1b93（164 → 0）
 
 ### 背景
