@@ -289,7 +289,7 @@ import {
   localRouteFallbackProfiles,
   undialedSshRouteSeeds
 } from './plugin-profile-routes'
-import { evictPoolEntries } from './pool-eviction'
+import { evictPoolEntries, selectPoolEvictions } from './pool-eviction'
 import { clampPoolLimits, parsePoolLimits, POOL_LIMITS_DEFAULTS } from './pool-limits'
 import {
   decideLocalBackendAdmission,
