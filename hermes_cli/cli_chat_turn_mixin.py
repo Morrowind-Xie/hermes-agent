@@ -27,6 +27,13 @@ class CLIChatTurnMixin:
     # process exit code (see cli._run_single_query_mode) read this instead.
     _last_turn_result = None
 
+    # Bridge mirroring state. Written by HermesCLI.__init__ (cli.py) and
+    # CLIBridgeMixin; defaulted here because a mixin method can run on an object
+    # built without the full CLI — upstream tests stub the mixin class directly
+    # (tests/hermes_cli/test_interrupt_requeue_image_payload.py).
+    _bridge_platform = None
+    _bridge_chat_id = None
+
     def chat(self, message, images: list = None, voice_input: bool = False) -> Optional[str]:
         """Run one user turn; returns the agent's response, or None on error.
 

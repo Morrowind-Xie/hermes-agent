@@ -3710,19 +3710,16 @@ class HermesCLI(CLIProcessNotificationsMixin, CLIAgentSetupMixin, CLICommandsMix
             if not _restored:
                 # Fall back to config.yaml bridge: section
                 try:
-                    import yaml as _yaml
-                    _cfg_path = get_hermes_home() / "config.yaml"
-                    if _cfg_path.exists():
-                        _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
-                        _br = _cfg.get("bridge", {})
-                        # Support both flat {platform, chat_id} and {default: {platform, chat_id}}
-                        if isinstance(_br, dict):
-                            _plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
-                            _cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
-                            if _plat and _cid:
-                                self._bridge_platform = _plat
-                                self._bridge_chat_id = _cid
-                                _restored = True
+                    from hermes_cli.config import load_config_readonly
+                    _br = load_config_readonly().get("bridge") or {}
+                    # Support both flat {platform, chat_id} and {default: {platform, chat_id}}
+                    if isinstance(_br, dict):
+                        _plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                        _cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                        if _plat and _cid:
+                            self._bridge_platform = _plat
+                            self._bridge_chat_id = _cid
+                            _restored = True
                 except Exception:
                     pass
             if _restored:

@@ -204,20 +204,18 @@ class CLIBridgeMixin:
                     _account_id = ""
                     _base_url = ""
                     try:
-                        import yaml as _yaml
-                        _cfg_path = get_hermes_home() / "config.yaml"
-                        if _cfg_path.exists():
-                            _cfg = _yaml.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
-                            _wx_cfg = (
-                                _cfg.get("gateway", {}).get("platforms", {}).get("weixin")
-                                or _cfg.get("platforms", {}).get("weixin")
-                                or {}
-                            )
-                            _token = str(_wx_cfg.get("token") or "").strip()
-                            _account_id = str((_wx_cfg.get("extra") or {}).get("account_id") or "").strip()
-                            _base_url = str((_wx_cfg.get("extra") or {}).get("base_url") or "").strip()
+                        from hermes_cli.config import load_config_readonly
+                        _cfg = load_config_readonly()
+                        _wx_cfg = (
+                            ((_cfg.get("gateway") or {}).get("platforms") or {}).get("weixin")
+                            or ((_cfg.get("platforms") or {}).get("weixin"))
+                            or {}
+                        )
+                        _token = str(_wx_cfg.get("token") or "").strip()
+                        _account_id = str((_wx_cfg.get("extra") or {}).get("account_id") or "").strip()
+                        _base_url = str((_wx_cfg.get("extra") or {}).get("base_url") or "").strip()
                     except Exception as _ce:
-                        logger.debug("bridge: failed to read weixin config from yaml: %s", _ce)
+                        logger.debug("bridge: failed to read weixin config: %s", _ce)
                     # Fall back to environment variables
                     if not _token:
                         _token = _os.getenv("WEIXIN_TOKEN", "")

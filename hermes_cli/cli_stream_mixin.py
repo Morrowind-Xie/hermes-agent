@@ -46,6 +46,13 @@ def _terminal_columns(default: int = 80) -> int:
 class CLIStreamMixin:
     """Streaming output, reasoning preview, tool progress callbacks, and busy-command spinner for the interactive CLI"""
 
+    # Bridge mirroring state. Written by HermesCLI.__init__ (cli.py) and
+    # CLIBridgeMixin; defaulted here so the tool-progress bridge notification
+    # below works on an object built without the full CLI.
+    _bridge_platform = None
+    _bridge_chat_id = None
+    _bridge_progress_notified = False
+
     def _on_thinking(self, text: str) -> None:
         """Called by agent when thinking starts/stops. Updates TUI spinner."""
         if not text:

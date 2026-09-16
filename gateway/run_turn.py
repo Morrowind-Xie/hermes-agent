@@ -2107,18 +2107,18 @@ class GatewayTurnMixin:
                 except Exception:
                     pass
             if not _tui_takeover:
-                # Also check config.yaml bridge: section
+                # Also check config.yaml bridge: section. The sanctioned loader,
+                # not a raw yaml.safe_load: merged + managed overlay + ${ENV}
+                # expansion, cached by file signature, and resolved at call time
+                # so the profile scope bound for this turn is the one read.
                 try:
-                    import yaml as _yaml_bridge
-                    _cfg_path = _ghh_bridge() / "config.yaml"
-                    if _cfg_path.exists():
-                        _cfg_b = _yaml_bridge.safe_load(_cfg_path.read_text(encoding="utf-8")) or {}
-                        _br = _cfg_b.get("bridge", {})
-                        if isinstance(_br, dict):
-                            _br_plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
-                            _br_cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
-                            if _br_plat == _platform_name.lower() and _br_cid == (source.chat_id or ""):
-                                _tui_takeover = True
+                    from hermes_cli.config import load_config_readonly
+                    _br = load_config_readonly().get("bridge") or {}
+                    if isinstance(_br, dict):
+                        _br_plat = (_br.get("platform") or (_br.get("default") or {}).get("platform") or "").strip().lower()
+                        _br_cid = (_br.get("chat_id") or (_br.get("default") or {}).get("chat_id") or "").strip()
+                        if _br_plat == _platform_name.lower() and _br_cid == (source.chat_id or ""):
+                            _tui_takeover = True
                 except Exception:
                     pass
             if _tui_takeover and event.text:
