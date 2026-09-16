@@ -4,6 +4,56 @@
 
 ---
 
+## 2026-09-16: 上游同步至 03b0c79472（464 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **464** 个提交（分叉点 `b3feb88a95`，即 09-15 同步的上游 tip；上游 09-14/15/16 分别推了 25/339/65 个提交，仍在高强度迭代期）、领先 58 个（本地私有工作）。929 files / +34972 −5662。无新 tag（最新仍是 `v2026.9.14`）。`pyproject.toml` 未变、各层 `package.json`/`package-lock.json` 全未变 → 无需 `npm ci`；`uv.lock` 仅 extras 排除列表顺序 + 一个 `google-cloud-pubsub = false`，无包版本变化 → 无需 `uv sync`。
+
+### 流程
+
+工作区干净 → `merge origin/main`（63a790669b）→ **2 个冲突**，都是 `apps/desktop/electron` 同一个 import 成员列表，取并集（按大小写无关字母序）：
+
+- `main.ts`：本地 `decideLocalBackendAdmission` ⟷ 上游 `BackgroundSlotRetryBackoff` / `BackgroundSlotRetryDeferredError` / `isBackgroundSlotRetryDeferred`
+- `pool-spawn-coordinator.test.ts`：本地 `decideLocalBackendAdmission, isLocalBackendPoolSaturatedError` ⟷ 上游 `BackgroundSlotRetryBackoff`
+
+其余 16 个高交集文件（`cli.py`、`hermes_cli/main.py`、`agent/auxiliary_client.py`、7 个 i18n、`store/gateway.ts`、`pool-spawn-coordinator.ts`、`tests/hermes_cli/test_gui_command.py`、`gateway/run_turn.py`、`cli_chat_turn_mixin.py`、`main_desktop.py`）全部 auto-merge。合并前用 `git merge-tree --write-tree` 预演过，冲突面与实跑一致。
+
+### 语义重叠（已审，未改代码）
+
+上游 09-15 自己动了 slot-storm 同一问题：`68e4833134` + `1220491468` 引入 `BackgroundSlotRetryBackoff`（per-profile 60s→15min 指数退避，只作用于 background hydration，成功拿槽即 clear）。我们 09-05 的 `426ef1dea2` 是满池 fail-fast（`decideLocalBackendAdmission` + `localBackendPoolSaturatedMessage`）+ 渲染进程 60s+抖动慢重试。合并后调用序是本地 admission 在前（`main.ts:12598`）→ 满池即抛 saturation Error，走不到上游 `canAttempt`（`main.ts:12618`）；上游 `recordFailure` 只在 slot-wait timeout 触发，因此**上游那层退避在"结构性满池"场景被本地 fail-fast 短路**，节流改由渲染进程慢时钟承担（每次 roster refresh 至多一条 `failed to start: Local agent limit reached`，非 storm 级）。行为可接受，本次不改；若后续上游把 admission 判定收进 coordinator，需要重新对齐。
+
+### 上游要点
+
+- desktop：timeline 虚拟化 + 历史跳转上限、跨 pane 共享 floating composer、hover-only scrollbar、transcript owner 归属校验（R1–R5）、OAuth 登录带 Cloudflare Access 头、3xx 一律按重定向分类并点名 Location
+- **规范变化**：10 个 `AGENTS.md` +205 行。根 `AGENTS.md` 新增硬规则"一个进程可服务多 profile，turn 之外的代码必须显式绑定 profile scope"，并**删掉了旧的"Module-level constants are fine"**；E2E 要求升级为两个 temp `HERMES_HOME` 做 A→B→A；新增 advisory lint `scripts/check_profile_scope_patterns.py`（CI 用法见 `lint.yml:210`）
+- profile scope 绑定点清单：`gateway/run.py::_profile_runtime_scope`、`tui_gateway/server.py::@_profile_scoped`、`cron/scheduler_provider.py::_profile_cron_scope`、`gateway/run_agent_cache.py::_run_release_in_profile_scope`
+- sessions：prompt 索引不再水化整份 transcript
+
+### 验证
+
+- 冲突标记清零（`tests/tools/test_mcp_oauth_metadata.py:10` 的 `=======` 是上游 docstring 的 RST 下划线，非标记）；`py_compile` cli / run_agent / model_tools / toolsets / hermes_state / hermes_constants / gateway.run / hermes_cli.main / agent.auxiliary_client / tui_gateway.server 全 OK；import 冒烟 6 模块 OK
+- **环境坑（值得记）**：`apps/desktop/node_modules` 是空的（连 `electron`、`@testing-library/react` 都没装），`npm run typecheck` 因此报 **1048 错 / 479 文件**，其中 391 个文件本次根本没被合并触碰 → 先别当合并回归。装依赖时 `.npmrc` 的 `engine-strict=true` 会拒本机 npm 11.12.1（engines 要求 `<11.10.0 || >=11.17.0`），需 `npm_config_engine_strict=false npm install --workspace apps/desktop`（780 包 / 32s）。装完 npm 顺手重写 `package-lock.json`（3 行 `min-release-age-exclude` churn），已 `git checkout --` 还原
+- 装好后 `npm run typecheck`（renderer + electron + e2e 三个 project）**全绿 exit 0**
+- 定向 vitest 7 文件 / 73 测试全绿：`electron/pool-spawn-coordinator.test.ts` 29（含冲突文件与上游新 backoff 用例）、`src/store/gateway-pool-saturation.test.ts` 4（本地慢重试逻辑完好）、`src/i18n` 31（en.ts 合并后各语言 key 一致）、`electron/pool-eviction.test.ts` 9（`selectPoolEvictions` 完好）
+- 定向 pytest 6 文件 / 259 测试全绿：微信桥 32、`test_gui_command` 50、`test_cmd_update` 47、`test_actual_auxiliary_routing` 121、tui heartbeat 7、profile-scope 2
+- `web/src` 7 文件有变 → 已重建 `hermes_cli/web_dist`（vite ✓ built in 4.38s）
+- 本地私有修复全部仍在：单实例锁提示（`main.ts:13000`）、`electron_flags`（`main_desktop.py:1209`）、输入法可达性（`bootstrap-platform.ts`）、messageRepository identity（`runtime-repository.ts:52`）、postinstall 的 assistant-ui render-loop 补丁在装依赖时正常应用
+
+### 本次同步暴露的两个真红灯（待处理，均不在上游改动面内）
+
+1. `tests/hermes_cli/test_interrupt_requeue_image_payload.py`（2 个用例，**上游本次新增的文件**）：`_Stub(CLIChatTurnMixin)` 不调 `super().__init__()`，而 `cli_chat_turn_mixin.py:487` 的本地 bridge 镜像块直接读 `self._bridge_platform` → `AttributeError`。修法：把 `_bridge_platform` / `_bridge_chat_id` 声明为 mixin 的类级默认值（`None`）——不动上游测试文件（否则每次同步都撞），也不是 getattr 式防御性兜底。
+2. `tests/hermes_cli/test_config_read_guard.py`（1 个用例，上游本次**未改**该守卫）：3 处本地私有代码裸读 config.yaml — `cli.py:3716`、`hermes_cli/cli_bridge_mixin.py:210`（合并前就有，本地既有债）、`gateway/run_turn.py:2115`（合并前这段在 ALLOWLIST 内的 `gateway/run.py`，上游把它拆成兄弟文件后掉出白名单，属"sibling 搬家导致落点漂移"那一类）。修法：三处都换成 `hermes_cli.config.load_config_readonly()`；已实测它保留未知 `bridge:` 段与 `gateway.platforms.weixin`（顶层 `platforms.weixin` 仍为 None，OR 回退链语义不变），且是缓存读，比每条消息重新 read+parse 更快。
+
+### 环境类红灯（非本次合并引入，不处理）
+
+- `tests/hermes_cli/test_dashboard_auth_gate.py`（4）：`SystemExit: 75`，本机 9119 端口被自己跑的 gateway/dashboard 占用
+- `tests/hermes_cli/test_gateway_service.py`（1）：期望 `/home/alice/.local/bin`，实得 `/root/bin`（调用方 PATH 泄漏）
+- 大盘（`tests/hermes_cli + gateway + tui_gateway`，2210 文件 / ~19700 测试）另外跑出的 7 个 gateway/tui_gateway 红灯（`test_compression_failure_session_sync`、`test_api_server_active_work_drain`、`test_session_hygiene`、`test_session_hygiene_turnhold_adoption`、`test_install_cua_driver`、`test_compute_host_turn_protocol`、`test_deferred_agent_build_cwd`）全是墙钟等待型，**`-j 4` 安静复跑后全部转绿** → 24 worker + vitest + tsserver 抢 CPU 造成的假阳性。记此以免下次误判：**验证阶段不要把 pytest 大盘和 vitest 同时压在一台机器上跑**。
+
+---
+
+
 ## 2026-09-15: 上游同步至 b3feb88a95（1366 → 0）
 
 ### 背景
