@@ -274,7 +274,11 @@ describe('useRuntimeMessageRepository reference identity', () => {
   })
 
   it('returns a fresh repository when the head moves', () => {
-    const messages = [text('user-1', 'user', 'hi'), text('assistant-1', 'assistant', 'a'), text('assistant-2', 'assistant', 'b')]
+    const messages = [
+      text('user-1', 'user', 'hi'),
+      text('assistant-1', 'assistant', 'a'),
+      text('assistant-2', 'assistant', 'b')
+    ]
     const { result, rerender } = renderWith(messages)
     const first = result.current
 
