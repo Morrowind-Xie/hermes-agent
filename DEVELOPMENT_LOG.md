@@ -54,15 +54,33 @@
 
 `tests/hermes_cli/test_slash_dispatch_table.py::test_registry_names_resolve_into_the_table`：上游这条 parity 守卫把"registry 里能被 dispatch 的命令集合"与 `OLD_CHAIN_COMMANDS` 做**全等**比较，我们私有的 `/bridge`（`hermes_cli/commands.py` 注册，经命名约定回退解析，不在 `_SLASH_DISPATCH` 显式表里）成为多出的一项。合并前就是红的（上游本次未改该文件）。可选修法：把本地私有命令抽成 `_LOCAL_PRIVATE_COMMANDS = {"bridge"}` 常量并入期望集合——代价是给上游测试文件留一个每次同步都要重放的本地 delta，故本次不动。
 
-
 ### 环境类红灯（非本次合并引入，不处理）
 
 - `tests/hermes_cli/test_dashboard_auth_gate.py`（4）：`SystemExit: 75`，本机 9119 端口被自己跑的 gateway/dashboard 占用
 - `tests/hermes_cli/test_gateway_service.py`（1）：期望 `/home/alice/.local/bin`，实得 `/root/bin`（调用方 PATH 泄漏）
 - 大盘（`tests/hermes_cli + gateway + tui_gateway`，2210 文件 / ~19700 测试）另外跑出的 7 个 gateway/tui_gateway 红灯（`test_compression_failure_session_sync`、`test_api_server_active_work_drain`、`test_session_hygiene`、`test_session_hygiene_turnhold_adoption`、`test_install_cua_driver`、`test_compute_host_turn_protocol`、`test_deferred_agent_build_cwd`）全是墙钟等待型，**`-j 4` 安静复跑后全部转绿** → 24 worker + vitest + tsserver 抢 CPU 造成的假阳性。记此以免下次误判：**验证阶段不要把 pytest 大盘和 vitest 同时压在一台机器上跑**。
 
----
+### 落盘与推送
 
+| 提交 | 内容 |
+|---|---|
+| `63a790669b` | `Merge remote-tracking branch 'origin/main'`（464 个上游提交，2 处 import 并集冲突） |
+| `4f350f91a2` | `docs: add upstream sync log 2026-09-16 (464 -> 0)` |
+| `2faeb5340d` | `fix(bridge): default bridge state on the reader mixins; read config via the sanctioned loader`（5 文件 +46 −37） |
+| `837e9fcc69` | `docs: record the two post-sync bridge fixes in the 2026-09-16 sync log` |
+
+已 `git push fork main`（`3ba2799308..837e9fcc69`）。收尾状态：工作区干净（脏文件 0）、落后 `origin/main` **0**、领先 **62**、`main` 与 `fork/main` 同步；临时 worktree `/tmp/premerge` 已 `git worktree remove` + `prune`，探针脚本与临时 home 已删，后台 `nohup.out`（`apps/desktop/`、`web/`）已清。
+
+### 下次同步的注意点
+
+1. **验证节奏**：定向集就够（本次 6 + 5 文件 / 305 个用例，约 1 分钟）。别再把 pytest 大盘和 vitest 压在同一台机器上——那次并发直接造出 7 个墙钟型假阳性，排查它花的时间远超合并本身。
+2. **desktop 依赖现在装好了**（780 包）：`npm run typecheck` 从今往后是有意义的门禁；空 `node_modules` 时它会喷 1000+ 条 TS2307，别当合并回归。装依赖要 `npm_config_engine_strict=false`（`.npmrc` 的 `engine-strict=true` × 本机 npm 11.12.1 不在 engines 允许区间），且装完要 `git checkout -- package-lock.json` 抹掉 npm 的 3 行 churn。
+3. **`/bridge` 那条 dispatch 守卫仍是红的**（见上），每次同步都会看到；要么接受，要么接受"在上游测试文件里留一个本地 delta"的代价。
+4. **slot 退避顺序**：本地 admission fail-fast（`main.ts:12598`）仍在上游 `canAttempt`（`main.ts:12618`）之前。上游若把 admission 判定收进 coordinator，这段要重审。
+5. **新 profile-scope 规范**：根 `AGENTS.md` 已删掉"Module-level constants are fine"，模块级 home/config 派生常量现在算 bug 类。本次已跑 `scripts/check_profile_scope_patterns.py --files gateway/platforms/weixin.py gateway/session_bridge.py`，命中 1 条 `weixin.py:1028 P28/C1`（media 投递按默认 profile 的 Docker mounts 校验）——但该文件与上游逐字节相同，属上游自有 advisory，本地不动。下次改私有 bridge 代码前后各跑一次这个 lint。
+6. **editable 安装的 finder 映射会漏新顶层模块**（顺带踩到，非本次同步引入）：`venv` 里 `__editable___hermes_agent_0_21_0_finder.py` 没有 `hermes_state_ids`（上游 09-12 新增）。从仓库根跑一切正常（`sys.path[0]=''` 兜住），但从别的 cwd 跑脚本会 `ModuleNotFoundError: No module named 'hermes_state_ids'`。要消除就重装 editable（`pip install -e .` 或 `uv sync`）。
+
+---
 
 ## 2026-09-15: 上游同步至 b3feb88a95（1366 → 0）
 
