@@ -40,10 +40,20 @@
 - `web/src` 7 文件有变 → 已重建 `hermes_cli/web_dist`（vite ✓ built in 4.38s）
 - 本地私有修复全部仍在：单实例锁提示（`main.ts:13000`）、`electron_flags`（`main_desktop.py:1209`）、输入法可达性（`bootstrap-platform.ts`）、messageRepository identity（`runtime-repository.ts:52`）、postinstall 的 assistant-ui render-loop 补丁在装依赖时正常应用
 
-### 本次同步暴露的两个真红灯（待处理，均不在上游改动面内）
+### 本次同步暴露的两个真红灯（已修）
 
-1. `tests/hermes_cli/test_interrupt_requeue_image_payload.py`（2 个用例，**上游本次新增的文件**）：`_Stub(CLIChatTurnMixin)` 不调 `super().__init__()`，而 `cli_chat_turn_mixin.py:487` 的本地 bridge 镜像块直接读 `self._bridge_platform` → `AttributeError`。修法：把 `_bridge_platform` / `_bridge_chat_id` 声明为 mixin 的类级默认值（`None`）——不动上游测试文件（否则每次同步都撞），也不是 getattr 式防御性兜底。
-2. `tests/hermes_cli/test_config_read_guard.py`（1 个用例，上游本次**未改**该守卫）：3 处本地私有代码裸读 config.yaml — `cli.py:3716`、`hermes_cli/cli_bridge_mixin.py:210`（合并前就有，本地既有债）、`gateway/run_turn.py:2115`（合并前这段在 ALLOWLIST 内的 `gateway/run.py`，上游把它拆成兄弟文件后掉出白名单，属"sibling 搬家导致落点漂移"那一类）。修法：三处都换成 `hermes_cli.config.load_config_readonly()`；已实测它保留未知 `bridge:` 段与 `gateway.platforms.weixin`（顶层 `platforms.weixin` 仍为 None，OR 回退链语义不变），且是缓存读，比每条消息重新 read+parse 更快。
+1. `tests/hermes_cli/test_interrupt_requeue_image_payload.py`（2 个用例，**上游本次新增的文件**）：`_Stub(CLIChatTurnMixin)` 不调 `super().__init__()`，而 `cli_chat_turn_mixin.py` 的本地 bridge 镜像块直接读 `self._bridge_platform` → `AttributeError`。
+   **修法**：把 `_bridge_platform` / `_bridge_chat_id`（以及 `cli_stream_mixin.py` 同类读点用到的 `_bridge_progress_notified`）声明为**两个 reader mixin 的类级默认值**，风格对齐同文件既有的 `_last_turn_result = None`。这样不动上游测试文件（否则每次同步都撞），也不是 getattr 式防御性兜底；生产路径行为不变（`HermesCLI.__init__` 的实例属性照常遮蔽类属性）。
+2. `tests/hermes_cli/test_config_read_guard.py`（1 个用例，上游本次**未改**该守卫）：3 处本地私有代码裸读 config.yaml — `cli.py:3716`、`hermes_cli/cli_bridge_mixin.py:210`（合并前就有，本地既有债）、`gateway/run_turn.py:2115`（合并前这段在 ALLOWLIST 内的 `gateway/run.py`，上游把它拆成兄弟文件后掉出白名单，属"sibling 搬家导致落点漂移"那一类）。
+   **修法**：三处都换成 `hermes_cli.config.load_config_readonly()`（函数内 late import，与该文件既有风格一致）。选它的依据：`_load_config_impl` 在**调用时**解析 `get_config_path()`，缓存按 `path_key` + `file_signature` + env 快照分槽 → 天然满足新的 profile-scope 规则；`_deep_merge(DEFAULT_CONFIG, user)` 保留未知的 `bridge:` 段（已实测）；缓存读比原来"每条消息重新 read+parse 整个 YAML"更快。`cli_bridge_mixin.py` 的 weixin 读取顺手把 `_cfg.get("gateway", {})` 改成 `(_cfg.get("gateway") or {})`，避免用户写 `gateway:` 空值时 `.get` 打在 None 上。
+
+**验证**：`scripts/run_tests.sh -j 4` 定向 5 文件 → **46✓ 0✗ 1 skipped**（`test_interrupt_requeue_image_payload` 2✓、`test_config_read_guard` 2✓、微信桥 32✓、`test_weixin_secret_scope`、`test_send_message_tool`）；5 个改动文件 `py_compile` OK；`cli` / `gateway.run_turn` / `cli_bridge_mixin` / `cli_stream_mixin` import 冒烟 OK。
+另用一次性 E2E 探针（不入库）走真实链路证明 `run_turn.py` 那处读取在**绑定 profile scope** 下正确：两个 temp home 做 A→B→A，`_profile_runtime_scope(home)` + `load_config_readonly()` 依次返回 `chat_A → chat_B → chat_A`，无默认 profile 泄漏。（探针的 cli.py / weixin 发送两段因 `_tui_print_startup` 需要整条 banner+onboarding 桩链，未继续深挖；其行为由上面的 46 个用例与既有微信桥测试覆盖。）
+
+### 仍未处理的一个本地既有红灯（非本次同步引入）
+
+`tests/hermes_cli/test_slash_dispatch_table.py::test_registry_names_resolve_into_the_table`：上游这条 parity 守卫把"registry 里能被 dispatch 的命令集合"与 `OLD_CHAIN_COMMANDS` 做**全等**比较，我们私有的 `/bridge`（`hermes_cli/commands.py` 注册，经命名约定回退解析，不在 `_SLASH_DISPATCH` 显式表里）成为多出的一项。合并前就是红的（上游本次未改该文件）。可选修法：把本地私有命令抽成 `_LOCAL_PRIVATE_COMMANDS = {"bridge"}` 常量并入期望集合——代价是给上游测试文件留一个每次同步都要重放的本地 delta，故本次不动。
+
 
 ### 环境类红灯（非本次合并引入，不处理）
 
