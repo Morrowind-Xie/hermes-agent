@@ -1,3 +1,5 @@
+import type { WaitableChild } from './backend-child'
+
 /**
  * Admission policy for one local profile-backend spawn.
  *
@@ -167,6 +169,38 @@ export class BackgroundSlotRetryBackoff {
   }
 }
 
+/** Register at spawn, before claiming ownership or awaiting readiness. */
+export function registerLocalBackendExitFinalizer<Entry extends { process: WaitableChild | null }>(
+  pool: Map<string, Entry>,
+  key: string,
+  entry: Entry,
+  release: ReleaseLocalBackendSlot
+): void {
+  const child = entry.process
+
+  const finalize = () => {
+    child?.removeListener('exit', finalize)
+    child?.removeListener('error', spawnFailed)
+
+    if (pool.get(key) === entry) {
+      pool.delete(key)
+    }
+
+    release()
+  }
+
+  const spawnFailed = () => {
+    // Failed spawn has no PID and emits error, but never exit. A signal error
+    // against an existing child is not evidence of exit and must keep its slot.
+    if (!child?.pid) {
+      finalize()
+    }
+  }
+
+  child?.once('exit', finalize)
+  child?.once('error', spawnFailed)
+}
+
 export async function releaseLocalBackendSlotAfterExit(
   release: ReleaseLocalBackendSlot,
   waitForExit: () => Promise<void>
@@ -190,6 +224,23 @@ export class LocalBackendSpawnCoordinator {
   #activeForeground = 0
   #activeBackground = 0
   #queue: Waiter[] = []
+  #listeners = new Set<() => void>()
+
+  get foregroundWaiters(): ReadonlySet<string> {
+    return new Set(this.#queue.filter(waiter => waiter.priority === 'foreground').map(waiter => waiter.key))
+  }
+
+  onChange(listener: () => void): () => void {
+    this.#listeners.add(listener)
+
+    return () => { this.#listeners.delete(listener) }
+  }
+
+  #changed(): void {
+    for (const listener of this.#listeners) {
+      listener()
+    }
+  }
 
   constructor(limit: number) {
     if (!Number.isInteger(limit) || limit < 1) {
@@ -323,6 +374,7 @@ export class LocalBackendSpawnCoordinator {
     this.#queue.splice(index, 1)
     this.#clearTimer(waiter)
     waiter.reject(error)
+    this.#changed()
 
     return true
   }
@@ -393,5 +445,7 @@ export class LocalBackendSpawnCoordinator {
       this.#clearTimer(next)
       next.resolve(this.#grant('background'))
     }
+
+    this.#changed()
   }
 }
