@@ -4,6 +4,54 @@
 
 ---
 
+## 2026-09-20: 上游同步至 4d14aaf477（2638 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **2638** 个提交（分叉点 `03b0c79472`，即 09-16 的上游 tip；上游 09-17/18/19/20 处于更高强度的迭代期，单日峰值体量与 09-15 相当）、领先 63 个（本地私有工作）。无新 tag（最新仍是 `v2026.9.14`，其上已累积 3792 个提交）。`apps/desktop/package.json` 0.17.3 → **0.17.6** 且 `package-lock.json` 随之变 → 需要 `npm ci`；`pyproject.toml` 仅 +1 行（注册 pytest marker `real_post_swap_handoff`）、`uv.lock` 未变 → 无需 `uv sync`；`web/src` 13 文件变 → 重建 `hermes_cli/web_dist`。
+
+本次触发点是 desktop 两个现场症状（中文输入法又失效、界面显示/渲染不对）。排查结论先记在这里，避免下次重复诊断：
+
+- **输入法**：`XMODIFIERS/@im=fcitx`、`GTK_IM_MODULE`、`QT_IM_MODULE` 只 export 在 `~/.bashrc`；从应用网格启动（`~/.local/share/applications/hermes.desktop`，`Terminal=false`）拿不到 → CJK 输入进不来。`desktop.log` 的 `[ime]` 行正好在这种环境里**沉默**（`describeLinuxInputMethod` 在"没有请求任何 im-module 且 locale 为 C.UTF-8"时按设计不输出），所以 09-17 之后的运行都没有这行，而 shell 启动的都有。
+- **界面显示**：上游 `8ffc2f0369`（09-17，#113247）修的正是本机形态（WSLg）：frameless 窗口没有最小化/最大化/关闭（改为 renderer 自绘 + `hermes:window-control` IPC）、WSLg 的 RAIL 合成器会把**最大化的 frameless 窗口摆偏出工作区**（新增 `maximizedBoundsCorrection`）、以及 `entry.ts` 在 Electron 初始化前为 WSLg 选 native Wayland。本次同步把这些带进树。
+
+### 流程
+
+工作区干净 → `git merge-tree --write-tree` 预演（**6 个冲突，与实跑完全一致**）→ `git merge origin/main` → 解冲突 → 合并提交 `db897775b5`（同步后 0 behind / 64 ahead）。
+
+### 冲突与取舍（6 文件，全部为"本地私有修复 ⟷ 上游新逻辑"的并集）
+
+| 文件 | 冲突 | 取舍 |
+|---|---|---|
+| `agent/auxiliary_client.py` | docstring | 取上游扩写版（`no_progress_timeout` 仅 Codex-Responses 传），**保留**本地 DeepSeek `reasoning_content` 剥离块 |
+| `apps/desktop/electron/main.ts` | 上游删掉 `pool-eviction` import | 只保留 `selectPoolEvictions`（`main.ts:12251` 准入判定在用；`evictPoolEntries` 已无调用点，留着即 unused-import 红灯） |
+| `pool-spawn-coordinator.ts` | 上游新增 `import type { WaitableChild }` | 并集：上游 import + 本地 admission 策略块 |
+| `pool-stop.test.ts` | 两侧各加一个用例 | 并集，两个用例都留 |
+| `src/store/gateway.ts`（4 处） | import / open 路径 / 重连错误 / `Secondary` 字段 | 并集：`notify`+`notifyError`,`RECOVERY_ACTIONS`+liveness policy；open 路径本地 saturation 复位 + 上游 `lastOpenedAt`/探活复位；重连处**上游 `isGatewayReauthRequired` 早返回放在本地 `notePoolSaturation` 之前**（需要重新登录的失败不该同时播报池饱和）；字段 `retiredByPool` + `poolSaturated`/`saturationAnnounced` |
+| `hermes_cli/cli_chat_turn_mixin.py`（3 处） | 类级默认值 / turn 主体 / 渲染收尾 | 并集：本地 bridge 类级默认值 + 上游 `_sync_fallback_chain_with_config`；turn 主体套上游 `notification_policy_snapshot`，本地 `turn.user_message = message` 放进该 `with` 内；`_chat_render_turn` 处**上游 `mute_notification_reply` 早返回在前**，本地微信桥镜像在后（被静音的诊断轮不进 bridge） |
+
+### 验证
+
+- 冲突标记清零；`py_compile` 14 个关键模块 + 6 模块 import 冒烟 OK
+- 定向 pytest 5 文件（微信桥 / `test_weixin_secret_scope` / `test_gui_command` / `test_config_read_guard` / `test_interrupt_requeue_image_payload`）：**104 passed, 9 skipped**
+- desktop `npm run typecheck`（renderer + electron + e2e 三套）**rc=0**
+- desktop 定向 vitest **12 文件 / 122 用例全绿**，含上游新增的 `electron/wslg-launch*.test.ts`、`window-controls.test.ts`、`titlebar-overlay-width.test.ts`
+- `hermes_cli/web_dist` 重建（vite ✓）；desktop 打包重建走 stage-and-swap（`hermes desktop --build-only`），`release/linux-unpacked/resources/install-stamp.json` = `db897775b5`（dirty=false）
+- 新产物冒烟：打包版启动正常（CDP 探针 root 已挂载、366 个可见元素、0 error），X11 窗口几何 `1379x914+466+74` 在 `rdp-0` 1920x1080 屏内；renderer bundle 已含 `window-control` 桥
+
+### 两个坑（都值得记）
+
+1. **并集式解冲突只 grep 标记不够，必须跑 typecheck**：`gateway.ts` 里我留下的一句 `entry.openedOnce = true` 已被上游 `lastOpenedAt` 取代 —— 标记清零、肉眼像"并集成功"，只有 `tsc` 报了 `TS2339: Property 'openedOnce' does not exist on type 'Secondary'`。删掉该行即绿。
+2. **WSL 在 `npm ci` 中途崩了 → `node_modules` 是半成品**：`electron`、`@assistant-ui` 直接消失（npm 先删后装），而产物目录与 git 树都完好。崩溃后按顺序恢复：先 `npm ci` 恢复依赖树 → 确认 `scripts/patch-assistant-ui-render-loop.mjs` 的补丁重新落盘（`grep -c hermes-render-loop-patch node_modules/@assistant-ui/core/dist/subscribable/subscribable.js` = 1）→ 再重跑 typecheck/定向测试。**别拿"树上没问题"当"环境没问题"。**
+
+### 遗留
+
+- 输入法仍靠本地 `desktop.electron_flags: [--ozone-platform=x11]`：显式 flag 会让上游新的 `wslgLaunchArgs` 短路（不切 native Wayland），fcitx5 以 `--disable wayland` 运行、只能走 XIM —— 即"输入法可用"与"上游 WSLg Wayland 路径"目前二选一。要么把 fcitx 环境变量提到会话级（`~/.config/environment.d/` 或写进 `.desktop` 的 `Exec=env …`）再摘 flag，要么维持现状。窗口按钮/最大化偏移两项修复与 ozone 后端无关，已随之生效。
+- `desktop.electron_flags` 的接线对启动环境敏感（应用网格 vs shell），下次改这块先看 `desktop.log` 有没有 `[ime]` 行。
+
+---
+
+
 ## 2026-09-16: 上游同步至 03b0c79472（464 → 0）
 
 ### 背景
