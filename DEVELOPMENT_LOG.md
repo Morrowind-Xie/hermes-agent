@@ -64,8 +64,10 @@
 | 提交 | 内容 |
 |---|---|
 | `e9ae73ec15` | `Merge remote-tracking branch 'origin/main'`（3194 个上游提交，4 处冲突） |
+| `9f36362a7d` | `docs: add upstream sync log 2026-09-24 (3194 -> 0)` |
+| `898c30f7f1` | `docs: record the verified runtime parity in the 2026-09-24 sync log` |
 
-收尾状态：落后 `origin/main` **0**、领先 **66**；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`）与日志已清。
+已 `git push fork main`（`394a6f6c5a..898c30f7f1`）。收尾状态：落后 `origin/main` **0**、领先 **68**、`main` 与 `fork/main` 同步；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`）与日志已清。
 
 ### 下次同步的注意点
 
