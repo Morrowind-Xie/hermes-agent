@@ -61,21 +61,23 @@
 
 ### Stash 积压清理（同日）
 
-`git stash list` 积了 5 条（最老 2026-04-16）。逐条体检后发现 **2 条含未落地的真实工作**，其余是过期产物：
+`git stash list` 积了 5 条（最老 2026-04-16）。逐条体检后发现 **2 条看着像未落地的真实工作**（其中 1 条经复核属误判，见下），其余是过期产物：
 
 | stash | 日期 | 内容 | 结论 |
 |---|---|---|---|
 | `stash@{0}` | 2026-09-12 | desktop 池「后台上限」饥饿的修复 + 诊断（给 `decideLocalBackendAdmission` 加 `backgroundActiveCount`/`priority`） | **仍未落地**（见下） |
-| `stash@{1}` | 2026-09-01 | GLM-5.3 恒思考（zai provider） | **已救回为 `d723515a0a`** |
+| `stash@{1}` | 2026-09-01 | GLM-5.3 恒思考（zai provider） | 曾救回为 `d723515a0a`，**复核后整体回退**（`c061a5f17c`，见下） |
 | `stash@{2}` | 2026-07-14 | 仅 `package-lock.json` −26 行 | 过期 npm churn，丢弃 |
 | `stash@{3}` | 2026-07-11 | `DEVELOPMENT_LOG.md` +9（该条已在 `a5ffebd9eb` 落盘）+ `package-lock` −26 | 过期，丢弃 |
 | `stash@{4}` | 2026-04-16 | `WEIXIN_UNIFIED_WITH_LOCAL`（把微信消息当 `Platform.LOCAL` 以共用 CLI 会话键） | 已被 bridge 设计（`bridge_subscription.json` + `cli_bridge_mixin`）取代，且属 `AGENTS.md` 已禁的"非机密配置走 env"，丢弃 |
 
 **无损归档**（丢弃前双备份）：补丁 `~/.hermes/stash-archive/2026-09-24/stash{0..4}-<date>.patch` + `METADATA.txt`，并各建一条 ref `refs/archive/stash{0..4}-<date>`（对象不被 gc）。清理后 `git stash list` 为空。
 
-**救回的修复**（`d723515a0a`）：`GLM53_EFFORTS` 由 `low/medium/high/max` **收窄为 `low/high/max`**（`medium` 降到 `low`），且 zai profile 对 5.3 **不再发 `thinking: {"type": "disabled"}`**；显式关闭（`enabled: false` / `effort: none`）降级为 `low`。一处**有意偏离原 stash**：原版把"完全没表达 effort"也变成 `low`，本次**保持 unset 不动**（沿用 `requested_effort` 的 unset 不落线约定），否则每次 5.3 调用都会被静默压到低档。验证：`test_zai_profile.py` 45✓ + `test_api_server_reasoning_ladder` / `test_model_switch_reasoning_reresolve` / `test_reasoning_config_per_model` 11✓，共 **56✓ 0✗**。
+**救回又回退的教训（`d723515a0a` → `c061a5f17c`）——记录这次误判本身**：该 stash 声称 GLM-5.3「恒思考」：`medium` 与 `thinking: {"type": "disabled"}` 均 400（2026-08-31 实测于 `open.bigmodel.cn`）。我救回的理由是"HEAD 里这个改动不在"——**这只验证了在不在，没验证对不对**，而且漏跑了 `git log -p -S GLM53_EFFORTS`：那一眼就能看到 `30f9955a44`（Teknium，2026-08-21，**关闭 issue #91789**）是**有意**把 5.3 扩成四档的，验证端点恰是 `api.z.ai/api/coding/paas/v4` —— 也就是本机 config 里 zai 指向的地址（`glm-5.3-flash` 还是第一 fallback）。收窄 `GLM53_EFFORTS` 等于把用户自己 `medium` 的请求**静默降级成 `low`**，正踩在根 `AGENTS.md` 的禁令上（"Read the original intent before restricting behavior; find a fix that preserves the feature"）。故**整体回退**：三个文件与 `origin/main` 逐字节一致（diff 0 行），`test_zai_profile.py` + reasoning ladder + model-switch 复跑 **46✓ 0✗**。
 
-**`stash@{0}` 为什么没一起救**：它是 desktop 池 admission 模型的扩展 —— 现在的 `decideLocalBackendAdmission` 只建模总量，看不见协调器的 `#backgroundLimit() = limit-1`，所以"后台请求永远等不到前台让出的那一个预留槽"这类饥饿仍会被判 `acquire` → 一路排到超时（这正是当年 `fitness` 卡 `5/6 busy` 的复发类）。修复要动 `main.ts` 调用点 + coordinator 状态 + 112 行测试，还要 typecheck/vitest/重打包一轮验证，属独立任务；代码已归档在 `refs/archive/stash0-2026-09-12`（或 `~/.hermes/stash-archive/2026-09-24/stash0-2026-09-12.patch`），随时可救。
+本想当场判死（本机 `~/.hermes/.env` 里有 `GLM_API_KEY`，发 5 个 `max_tokens=8` 的最小请求对比 baseline / `medium` / `low` / `thinking:disabled` / `thinking:enabled`），但 **`api.z.ai` 从本机根本不可达**：代理到 `example.com` 得 200、到 `api.z.ai` 得 000，直连是 TLS 中断。（顺带：这意味着本机 zai fallback 现在本身就是坏的。）结论：**这不是本地 fork 该覆盖的东西**——正确出口是向上游报 issue（"5.3 的 effort 词表疑似按端点不同：`api.z.ai/coding` 接受 `medium`，`bigmodel.cn` 拒绝 `medium` 与 `thinking:disabled`"），原始证据完整留在 `stash@{1}` 归档里。**`stash` 不等于"待落地的工作"——救回前先 `git log -p -S` 读原意。**
+
+**`stash@{0}` 为什么没一起救**：它是 desktop 池 admission 模型的扩展 —— 现在的 `decideLocalBackendAdmission` 只建模总量，看不见协调器的 `#backgroundLimit() = limit-1`，所以"后台请求永远等不到前台让出的那一个预留槽"这类饥饿仍会被判 `acquire` → 一路排到超时（这正是当年 `fitness` 卡 `5/6 busy` 的复发类）。修复要动 `main.ts` 调用点 + coordinator 状态 + 112 行测试，还要 typecheck/vitest/重打包一轮验证，且**必须先按上面的教训 `git log -p -S decideLocalBackendAdmission` 读一遍原意**（admission 是本地私有特性，但上游这段时间大改过 pool，`#backgroundLimit` 的语义可能已变）；代码已归档在 `refs/archive/stash0-2026-09-12`（或 `~/.hermes/stash-archive/2026-09-24/stash0-2026-09-12.patch`），随时可救。
 
 
 ### 落盘与推送
@@ -88,8 +90,9 @@
 | `66b9be96b5` | `docs: complete the 2026-09-24 sync log (commits, push range, final state)` |
 | `4c0006fa84` | `docs: finalize the 2026-09-24 sync log (push range, cleanup state)` |
 | `d723515a0a` | `fix(zai): GLM-5.3 is always-thinking — never send the disable marker or medium`（从 `stash@{1}` 救回） |
+| `c061a5f17c` | `Revert "fix(zai): GLM-5.3 is always-thinking …"`（复核后整体回退：该档位是上游有意加的，见上） |
 
-已 `git push fork main`（`4c0006fa84` 之前的区间为 `394a6f6c5a..4c0006fa84`）。收尾状态：落后 `origin/main` **0**、领先 **71**（截至 `d723515a0a`，本条日志自身的提交不计入）、`main` 与 `fork/main` 同步；`git stash list` **为空**（5 条全部归档后可安全丢弃，见上）；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`、`/tmp/*.log`、`/tmp/cli.py.bak`）与日志已清，冒烟启动的 app/backend 进程与窗口均已回收（0 残留）。
+已 `git push fork main`（`4c0006fa84` 之前的区间为 `394a6f6c5a..4c0006fa84`）。收尾状态：落后 `origin/main` **0**、领先 **73**（截至 `c061a5f17c`，本条日志自身的提交不计入）、`main` 与 `fork/main` 同步；zai 那三个文件**与上游 0 行差异**（救回→回退已归零）；`git stash list` **为空**（5 条全部归档后丢弃，见上）；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`、`/tmp/zai_probe.py`、`/tmp/*.log`、`/tmp/cli.py.bak`）已清，冒烟启动的 app/backend 进程与窗口均已回收（0 残留）。
 
 ### 下次同步的注意点
 
@@ -98,6 +101,7 @@
 3. **冒烟用 `setsid … < /dev/null`**（坑 2）；**打包版没有 CDP**（坑 3）。
 4. **同步会换掉正在运行的网关代码**：同步前先记下 gateway/dashboard/desktop 的 PID，同步后重启它们，否则一直在跑旧模块。
 5. 验证节奏照旧：不要同时压 pytest 大盘 + vitest + tsc；本次是 pytest（93）→ tsc → vitest（119）→ web build → desktop build 全串行，零假阳性。
+6. **stash ≠ 待落地的工作**：救回前先 `git log -p -S <符号>` 读原意，确认它不是"覆盖上游已合并的有意决定"。本次 `stash@{1}` 就是反例（本地实测端点 ≠ 上游验证端点 ≠ config 实际端点，最后整体回退）。同理，救 `stash@{0}` 之前也要先 `git log -p -S decideLocalBackendAdmission`。
 
 ---
 
