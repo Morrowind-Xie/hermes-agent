@@ -499,12 +499,13 @@ def _start_codex_thread(agent) -> str:
         return agent._codex_session.ensure_started()
 
 
-def _ensure_codex_session(agent) -> None:
+def _ensure_codex_session(agent, messages: List[Dict[str, Any]] | None = None) -> None:
     """Lazily spawn one CodexAppServerSession per AIAgent (reused across turns, closed by the _cleanup hook).
     A live session whose thread was started with a different prompt composition (TUI/Desktop ``/personality``
     or a prompt mirror mutate the agent in place) is retired first so the new thread carries the current one.
     Only the FIRST session of an AIAgent resumes the stored codex thread: a retired/recreated one keeps
-    today's fresh-thread behaviour and overwrites the binding once its turn is committed."""
+    today's fresh-thread behaviour and overwrites the binding once its turn is committed. ``messages`` is the
+    turn's transcript (current user row last); a thread started from scratch is seeded with the prior turns."""
     developer_instructions = _codex_developer_instructions(agent)
     if getattr(agent, "_codex_session", None) is not None:
         # Only a session whose recorded composition differs is stale; one attached without a record is kept.
@@ -537,9 +538,13 @@ def _ensure_codex_session(agent) -> None:
     # narrower item/started-only bridge from #38835.
     # Hermes owns the prompt: the same composition the standard loop sends as its system message
     # (cached per-session prompt + ephemeral additions such as channel overrides) rides along ONCE per
-    # thread as developerInstructions. A retired/recreated session re-sends the current composition;
-    # conversation history is still not projected into the codex thread (#74712, #26035).
+    # thread as developerInstructions. A retired/recreated session re-sends the current composition.
+    # A thread started from scratch (no resumable codex thread) also receives the session's prior turns
+    # once, so a /model switch into codex or a retired thread does not start blind (#74712, #26035).
+    # The recorded composition stays the bare prompt: the seed must not make the next turn retire the thread.
     agent._codex_session_prompt = developer_instructions
+    from agent.codex_runtime_history_seed import render_history_seed
+    history_seed = render_history_seed(messages) or None
     # A named custom provider (``providers.<name>``) maps onto codex's own ``[model_providers.<name>]``
     # table: send the stable id plus the active model and let codex resolve base_url/env_key itself, so
     # Hermes' credential never enters the JSON-RPC payload (#75186). openai/openai-codex keep codex's defaults.
@@ -554,7 +559,7 @@ def _ensure_codex_session(agent) -> None:
         on_event=make_codex_app_server_event_bridge(agent),
         developer_instructions=developer_instructions or None,
         model=getattr(agent, "model", None) if model_provider else None, model_provider=model_provider,
-        resume_thread_id=resume_thread_id,
+        resume_thread_id=resume_thread_id, history_seed=history_seed,
     )
 
 
@@ -627,7 +632,7 @@ def run_codex_app_server_turn(agent, *, user_message: str, original_user_message
         from agent.conversation_compression import _checkpoint_blocked
         raise _checkpoint_blocked("codex_app_server owns the authoritative thread and compacts it "
                                   "without a truthful pre-compaction transcript boundary")
-    _ensure_codex_session(agent)
+    _ensure_codex_session(agent, messages)
     try:
         _start_codex_thread(agent)
         turn = agent._codex_session.run_turn(user_input=user_message)
@@ -1053,14 +1058,22 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         if getattr(agent, "_last_api_first_chunk_at", None) is None:
             agent._last_api_first_chunk_at = now
         has_progress = _codex_event_has_content(event)
+        first_event = first_progress = False
         if watchdog_state is not None:
             with watchdog_state.lock:
-                if watchdog_state.retry_started_ts is not None:
-                    watchdog_state.retry_started_ts = None
-                    watchdog_state.last_progress_ts = None
+                first_event = watchdog_state.last_event_ts is None
                 watchdog_state.last_event_ts = now
                 if has_progress:
+                    first_progress = watchdog_state.last_progress_ts is None
                     watchdog_state.last_progress_ts = now
+                    if watchdog_state.phase_aware:
+                        watchdog_state.retry_started_ts = None
+        if first_event:
+            logger.info("Codex stream first parsed event at %.3f (attempt=%s/%s, model=%s)",
+                now, attempt + 1, max_stream_retries + 1, model)
+        if first_progress:
+            logger.info("Codex stream first substantive progress at %.3f (attempt=%s/%s, model=%s)",
+                now, attempt + 1, max_stream_retries + 1, model)
         agent._touch_activity("receiving stream response")
 
     def _interrupt_or_superseded() -> bool:
@@ -1100,6 +1113,8 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         # Claim the delta sink for THIS attempt; a newer attempt supersedes this token.
         writer_token["value"] = claim_stream_writer(agent)
         writer_token["raw_stream"] = _raw_stream
+        logger.debug("Codex stream opened (attempt=%s/%s, model=%s)",
+            attempt + 1, max_stream_retries + 1, model)
 
     def _drain_for_finalizer(event_stream: Any) -> None:
         # ``final`` is already assembled; draining only lets Relay run its finalizer. A transport error
@@ -1161,10 +1176,14 @@ def run_codex_stream(agent, api_kwargs: dict, client: Any = None, on_first_delta
         if agent._interrupt_requested:
             raise InterruptedError("Agent interrupted before Codex stream retry")
         if attempt > 0 and watchdog_state is not None and watchdog_state.phase_aware:
-            # A physical reconnect has its own no-event TTFB phase. Its first parsed
-            # event clears this marker and starts a fresh model-progress phase.
+            # One origin for the whole physical attempt: lifecycle frames may change
+            # diagnostics, but cannot restart the first-progress budget.
             with watchdog_state.lock:
                 watchdog_state.retry_started_ts = time.time()
+                watchdog_state.last_event_ts = None
+                watchdog_state.last_progress_ts = None
+                logger.info("Codex physical stream retry at %.3f (attempt=%s/%s, model=%s)",
+                    watchdog_state.retry_started_ts, attempt + 1, max_stream_retries + 1, model)
         intercepted_events: list = []
         writer_token["value"] = writer_token["raw_stream"] = event_stream = None
         writer_token["superseded_logged"] = False
