@@ -67,7 +67,7 @@
 | `9f36362a7d` | `docs: add upstream sync log 2026-09-24 (3194 -> 0)` |
 | `898c30f7f1` | `docs: record the verified runtime parity in the 2026-09-24 sync log` |
 
-已 `git push fork main`（`394a6f6c5a..898c30f7f1`）。收尾状态：落后 `origin/main` **0**、领先 **68**、`main` 与 `fork/main` 同步；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`）与日志已清。
+已 `git push fork main`（`394a6f6c5a..66b9be96b5`，本次同步共 merge + 3 条文档提交）。收尾状态：落后 `origin/main` **0**、领先 **69**（截至 `66b9be96b5`，本条日志自身的提交不计入）、`main` 与 `fork/main` 同步；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`、`/tmp/*.log`、`/tmp/cli.py.bak`）与日志已清，冒烟启动的 app/backend 进程与窗口均已回收（0 残留）。
 
 ### 下次同步的注意点
 
