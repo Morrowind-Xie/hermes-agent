@@ -73,9 +73,15 @@
 
 **无损归档**（丢弃前双备份）：补丁 `~/.hermes/stash-archive/2026-09-24/stash{0..4}-<date>.patch` + `METADATA.txt`，并各建一条 ref `refs/archive/stash{0..4}-<date>`（对象不被 gc）。清理后 `git stash list` 为空。
 
-**救回又回退的教训（`d723515a0a` → `c061a5f17c`）——记录这次误判本身**：该 stash 声称 GLM-5.3「恒思考」：`medium` 与 `thinking: {"type": "disabled"}` 均 400（2026-08-31 实测于 `open.bigmodel.cn`）。我救回的理由是"HEAD 里这个改动不在"——**这只验证了在不在，没验证对不对**，而且漏跑了 `git log -p -S GLM53_EFFORTS`：那一眼就能看到 `30f9955a44`（Teknium，2026-08-21，**关闭 issue #91789**）是**有意**把 5.3 扩成四档的，验证端点恰是 `api.z.ai/api/coding/paas/v4` —— 也就是本机 config 里 zai 指向的地址（`glm-5.3-flash` 还是第一 fallback）。收窄 `GLM53_EFFORTS` 等于把用户自己 `medium` 的请求**静默降级成 `low`**，正踩在根 `AGENTS.md` 的禁令上（"Read the original intent before restricting behavior; find a fix that preserves the feature"）。故**整体回退**：三个文件与 `origin/main` 逐字节一致（diff 0 行），`test_zai_profile.py` + reasoning ladder + model-switch 复跑 **46✓ 0✗**。
+**救回又回退的教训（`d723515a0a` → `c061a5f17c`）——记录我这两次误判本身**：该 stash 声称 GLM-5.3「恒思考」——`medium` 与 `thinking: {"type": "disabled"}` 均 400（2026-08-31 实测于 `open.bigmodel.cn`）。我**第一次**只验证了"HEAD 里这个改动不在"就救回（**在不在 ≠ 对不对**）；被你质疑后**第二次**又只看到 `30f9955a44`（Teknium，08-21，关闭 #91789，验证端点 `api.z.ai/api/coding/paas/v4`）就判定"这是上游有意加的四档、不该覆盖"，于是整体回退。**两次都错在没查上游现状**：
 
-本想当场判死（本机 `~/.hermes/.env` 里有 `GLM_API_KEY`，发 5 个 `max_tokens=8` 的最小请求对比 baseline / `medium` / `low` / `thinking:disabled` / `thinking:enabled`），但 **`api.z.ai` 从本机根本不可达**：代理到 `example.com` 得 200、到 `api.z.ai` 得 000，直连是 TLS 中断。（顺带：这意味着本机 zai fallback 现在本身就是坏的。）结论：**这不是本地 fork 该覆盖的东西**——正确出口是向上游报 issue（"5.3 的 effort 词表疑似按端点不同：`api.z.ai/coding` 接受 `medium`，`bigmodel.cn` 拒绝 `medium` 与 `thinking:disabled`"），原始证据完整留在 `stash@{1}` 归档里。**`stash` 不等于"待落地的工作"——救回前先 `git log -p -S` 读原意。**
+- issue tracker 里这件事已被报过 **4 次以上**，**2 个还开着**：`#96838`（P2，标题直接写着「coding-plan 端点拒绝 medium —— **GLM53 declared vocab must drop medium**」）、`#96222`（P2，「China 端点拒绝 medium，静默 fallback」）、`#85890`（「thinking off 即 400」）；`#96373`/`#97001` 已关为 dup。`#96838` 的证据是 `medium` 在 **coding-plan 端点**（`open.bigmodel.cn/api/coding/paas/v4` 与 `api.z.ai/api/paas/v4`）被 1210 拒绝 —— **正是本机 config 用的那类端点**，且与 08-21 的验证直接矛盾（同一路径、7 天后行为变了）。
+- **open PR 有 6 个**：`#102764`（最完整：两半 + 两条代码路径）、`#96228`、`#98465`、`#85891`（专门"stop sending thinking.disabled on GLM-5.3"）、`#91965`、`#85904`；`#97286`/`#91840` 已关。
+- 而 `origin/main`（截至 09-24 `9a6108fdf2`）**仍未修**：`GLM53_EFFORTS` 仍含 `medium`，禁用标记仍无条件发出。
+
+也就是说：**该 stash 的做法不是"覆盖上游的有意决定"，而恰恰是上游自己 3 个 issue + 6 个 PR 都在要的修法**。回退恢复了"与上游逐字节一致"，但也保留了一个已被反复上报、一个月未修的 P2 行为缺陷（本机 zai 是**第一 fallback**）。**是否本地重新落地，待确认（见 2026-09-24 结论）。** 至于"另开上游 issue"——**不开了**，那是第 5 个重复；有价值的是到既有 issue/PR 下补数据或推动合并。
+
+顺带：本想当场判死（本机 `~/.hermes/.env` 有 `GLM_API_KEY`，发 5 个 `max_tokens=8` 最小请求对比 baseline / `medium` / `low` / `thinking:disabled` / `thinking:enabled`），但 **`api.z.ai` 从本机不可达**（代理到 `example.com` 200、到 `api.z.ai` 000，直连 TLS 中断）——**本机 zai fallback 现在本身就是坏的**。
 
 **`stash@{0}` 为什么没一起救**：它是 desktop 池 admission 模型的扩展 —— 现在的 `decideLocalBackendAdmission` 只建模总量，看不见协调器的 `#backgroundLimit() = limit-1`，所以"后台请求永远等不到前台让出的那一个预留槽"这类饥饿仍会被判 `acquire` → 一路排到超时（这正是当年 `fitness` 卡 `5/6 busy` 的复发类）。修复要动 `main.ts` 调用点 + coordinator 状态 + 112 行测试，还要 typecheck/vitest/重打包一轮验证，且**必须先按上面的教训 `git log -p -S decideLocalBackendAdmission` 读一遍原意**（admission 是本地私有特性，但上游这段时间大改过 pool，`#backgroundLimit` 的语义可能已变）；代码已归档在 `refs/archive/stash0-2026-09-12`（或 `~/.hermes/stash-archive/2026-09-24/stash0-2026-09-12.patch`），随时可救。
 
@@ -101,7 +107,7 @@
 3. **冒烟用 `setsid … < /dev/null`**（坑 2）；**打包版没有 CDP**（坑 3）。
 4. **同步会换掉正在运行的网关代码**：同步前先记下 gateway/dashboard/desktop 的 PID，同步后重启它们，否则一直在跑旧模块。
 5. 验证节奏照旧：不要同时压 pytest 大盘 + vitest + tsc；本次是 pytest（93）→ tsc → vitest（119）→ web build → desktop build 全串行，零假阳性。
-6. **stash ≠ 待落地的工作**：救回前先 `git log -p -S <符号>` 读原意，确认它不是"覆盖上游已合并的有意决定"。本次 `stash@{1}` 就是反例（本地实测端点 ≠ 上游验证端点 ≠ config 实际端点，最后整体回退）。同理，救 `stash@{0}` 之前也要先 `git log -p -S decideLocalBackendAdmission`。
+6. **stash ≠ 待落地的工作，反之亦然**：救回前先 `git log -p -S <符号>` 读原意；**回退/否定一条既有改动前，先查 issue + PR tracker**。本次 `stash@{1}` 两头都踩了：第一次没读原意就救回，第二次只看一个上游 commit 就回退，而真相是上游开着的 P2 issue 与 6 个 open PR 都在要同一个修法。同理，救 `stash@{0}` 之前也要先 `git log -p -S decideLocalBackendAdmission` + 查 tracker。
 
 ---
 
