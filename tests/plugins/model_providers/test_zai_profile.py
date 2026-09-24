@@ -136,18 +136,20 @@ class TestZaiGLM52ReasoningEffort:
 
 
 class TestZaiGLM53ReasoningEffort:
-    """GLM-5.3's graded low/medium/high/max effort scale (issue #91789).
+    """GLM-5.3 is an always-thinking model: ``low``/``high``/``max`` only.
 
-    Verified live on api.z.ai/api/coding/paas/v4: all four levels accepted
-    with monotonic reasoning-token scaling. Unlike 5.2, low and medium must
-    reach the wire instead of clamping up to high.
+    ``thinking: {"type": "disabled"}`` and ``reasoning_effort: "medium"`` both 400 with
+    "该模型始终思考，不支持关闭思考；请使用 low、high 或 max" (live-verified 2026-08-31), so
+    the graded scale first seen on api.z.ai (#91789) has narrowed — ``medium`` clamps
+    down to ``low``, and an explicit "off" degrades to ``low`` rather than emitting the
+    rejected disable marker.
     """
 
     @pytest.mark.parametrize(
         ("effort", "expected"),
         [
             ("low", "low"),
-            ("medium", "medium"),
+            ("medium", "low"),
             ("high", "high"),
             ("max", "max"),
             ("xhigh", "max"),
@@ -161,6 +163,40 @@ class TestZaiGLM53ReasoningEffort:
         )
         assert extra_body == {"thinking": {"type": "enabled"}}
         assert top_level == {"reasoning_effort": expected}
+
+    def test_disabled_never_emits_the_rejected_marker(self, zai_profile):
+        """``enabled: False`` on 5.3 must not send ``thinking: disabled`` (it 400s);
+        the request degrades to the model's floor instead."""
+        extra_body, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": False}, model="glm-5.3"
+        )
+        assert extra_body == {}
+        assert top_level == {"reasoning_effort": "low"}
+
+    def test_explicit_none_effort_degrades_to_the_floor(self, zai_profile):
+        """``/reasoning none`` is an explicit off-request, so it maps to ``low``."""
+        extra_body, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": True, "effort": "none"}, model="glm-5.3"
+        )
+        assert extra_body == {"thinking": {"type": "enabled"}}
+        assert top_level == {"reasoning_effort": "low"}
+
+    @pytest.mark.parametrize("reasoning_config", [{}, {"enabled": True}])
+    def test_unset_effort_stays_unset(self, zai_profile, reasoning_config):
+        """No expressed effort leaves the server default alone — the floor is for
+        explicit off-requests only, not a silent cap on every 5.3 call."""
+        _, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config=reasoning_config, model="glm-5.3"
+        )
+        assert top_level == {}
+
+    def test_5_2_keeps_the_disable_marker(self, zai_profile):
+        """The 5.3 always-thinking carve-out must not leak into 5.2's wire."""
+        extra_body, top_level = zai_profile.build_api_kwargs_extras(
+            reasoning_config={"enabled": False}, model="glm-5.2"
+        )
+        assert extra_body == {"thinking": {"type": "disabled"}}
+        assert top_level == {}
 
     @pytest.mark.parametrize(
         "model",
