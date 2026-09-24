@@ -59,6 +59,25 @@
 - **仓库里还跑着旧代码的网关/大盘**：`venv/bin/python -m hermes_cli.main gateway run`（pid 474）与 `dashboard --port 9119`（pid 475）是**今天 20:20** 启动的，模块已是同步前的版本 —— 正是启动器警告的 "mixed sys.modules"。需要 `hermes gateway restart` + 重启 dashboard（**未自动执行**：那是用户正在用的微信桥）。这同时会让 `tests/hermes_cli/test_dashboard_auth_gate.py` 继续红（9119 被自己占用）。
 - profile-scope advisory：本地私有的 `hermes_cli/cli_bridge_mixin.py` 命中 3 条 P06/C5（`WEIXIN_TOKEN`/`WEIXIN_ACCOUNT_ID`/`WEIXIN_BASE_URL` 的 **env 回退**）——它是**先**用 sanctioned 的 `load_config_readonly()` 读 config.yaml，env 只是最后兜底；且该 mixin 只在 standalone CLI/TUI 进程里跑（该进程里 environ 就是当前 profile），属 lint 自述的"合法站点"。非本次合并引入，暂不动。
 
+### Stash 积压清理（同日）
+
+`git stash list` 积了 5 条（最老 2026-04-16）。逐条体检后发现 **2 条含未落地的真实工作**，其余是过期产物：
+
+| stash | 日期 | 内容 | 结论 |
+|---|---|---|---|
+| `stash@{0}` | 2026-09-12 | desktop 池「后台上限」饥饿的修复 + 诊断（给 `decideLocalBackendAdmission` 加 `backgroundActiveCount`/`priority`） | **仍未落地**（见下） |
+| `stash@{1}` | 2026-09-01 | GLM-5.3 恒思考（zai provider） | **已救回为 `d723515a0a`** |
+| `stash@{2}` | 2026-07-14 | 仅 `package-lock.json` −26 行 | 过期 npm churn，丢弃 |
+| `stash@{3}` | 2026-07-11 | `DEVELOPMENT_LOG.md` +9（该条已在 `a5ffebd9eb` 落盘）+ `package-lock` −26 | 过期，丢弃 |
+| `stash@{4}` | 2026-04-16 | `WEIXIN_UNIFIED_WITH_LOCAL`（把微信消息当 `Platform.LOCAL` 以共用 CLI 会话键） | 已被 bridge 设计（`bridge_subscription.json` + `cli_bridge_mixin`）取代，且属 `AGENTS.md` 已禁的"非机密配置走 env"，丢弃 |
+
+**无损归档**（丢弃前双备份）：补丁 `~/.hermes/stash-archive/2026-09-24/stash{0..4}-<date>.patch` + `METADATA.txt`，并各建一条 ref `refs/archive/stash{0..4}-<date>`（对象不被 gc）。清理后 `git stash list` 为空。
+
+**救回的修复**（`d723515a0a`）：`GLM53_EFFORTS` 由 `low/medium/high/max` **收窄为 `low/high/max`**（`medium` 降到 `low`），且 zai profile 对 5.3 **不再发 `thinking: {"type": "disabled"}`**；显式关闭（`enabled: false` / `effort: none`）降级为 `low`。一处**有意偏离原 stash**：原版把"完全没表达 effort"也变成 `low`，本次**保持 unset 不动**（沿用 `requested_effort` 的 unset 不落线约定），否则每次 5.3 调用都会被静默压到低档。验证：`test_zai_profile.py` 45✓ + `test_api_server_reasoning_ladder` / `test_model_switch_reasoning_reresolve` / `test_reasoning_config_per_model` 11✓，共 **56✓ 0✗**。
+
+**`stash@{0}` 为什么没一起救**：它是 desktop 池 admission 模型的扩展 —— 现在的 `decideLocalBackendAdmission` 只建模总量，看不见协调器的 `#backgroundLimit() = limit-1`，所以"后台请求永远等不到前台让出的那一个预留槽"这类饥饿仍会被判 `acquire` → 一路排到超时（这正是当年 `fitness` 卡 `5/6 busy` 的复发类）。修复要动 `main.ts` 调用点 + coordinator 状态 + 112 行测试，还要 typecheck/vitest/重打包一轮验证，属独立任务；代码已归档在 `refs/archive/stash0-2026-09-12`（或 `~/.hermes/stash-archive/2026-09-24/stash0-2026-09-12.patch`），随时可救。
+
+
 ### 落盘与推送
 
 | 提交 | 内容 |
@@ -66,8 +85,11 @@
 | `e9ae73ec15` | `Merge remote-tracking branch 'origin/main'`（3194 个上游提交，4 处冲突） |
 | `9f36362a7d` | `docs: add upstream sync log 2026-09-24 (3194 -> 0)` |
 | `898c30f7f1` | `docs: record the verified runtime parity in the 2026-09-24 sync log` |
+| `66b9be96b5` | `docs: complete the 2026-09-24 sync log (commits, push range, final state)` |
+| `4c0006fa84` | `docs: finalize the 2026-09-24 sync log (push range, cleanup state)` |
+| `d723515a0a` | `fix(zai): GLM-5.3 is always-thinking — never send the disable marker or medium`（从 `stash@{1}` 救回） |
 
-已 `git push fork main`（`394a6f6c5a..66b9be96b5`，本次同步共 merge + 3 条文档提交）。收尾状态：落后 `origin/main` **0**、领先 **69**（截至 `66b9be96b5`，本条日志自身的提交不计入）、`main` 与 `fork/main` 同步；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`、`/tmp/*.log`、`/tmp/cli.py.bak`）与日志已清，冒烟启动的 app/backend 进程与窗口均已回收（0 残留）。
+已 `git push fork main`（`4c0006fa84` 之前的区间为 `394a6f6c5a..4c0006fa84`）。收尾状态：落后 `origin/main` **0**、领先 **71**（截至 `d723515a0a`，本条日志自身的提交不计入）、`main` 与 `fork/main` 同步；`git stash list` **为空**（5 条全部归档后可安全丢弃，见上）；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`、`/tmp/*.log`、`/tmp/cli.py.bak`）与日志已清，冒烟启动的 app/backend 进程与窗口均已回收（0 残留）。
 
 ### 下次同步的注意点
 
