@@ -4,6 +4,79 @@
 
 ---
 
+## 2026-09-24: 上游同步至 9a6108fdf2（3194 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **3194** 个提交（分叉点 `4d14aaf477`，即 09-20 同步的上游 tip；上游 09-20→09-24 四天推了 3194 个，≈800/天，是迄今最猛的一段）、领先 65 个（本地私有工作）。新 tag **`v2026.9.21`、`v2026.9.24`**（= v0.21.5，`f97608f178`）。`pyproject.toml` 0.21.3 → **0.21.5** 且 `uv.lock` +100/−123 → 需 `uv sync`；`apps/desktop/package.json` 版本仍是 0.17.6，但**新增了依赖**（`@novnc/novnc@1.7.0`、`dbus-native@0.15.2`、`https-proxy-agent@7.0.6`、`proxy-from-env@2.1.0`、`@types/proxy-from-env@1.0.4`）→ 必须 `npm ci`；`web/src` 58 文件变 → 重建 `hermes_cli/web_dist`。规模 6154 files / +279101 −182617（`apps/desktop` 一个目录就占 1444 文件）。
+
+### 流程
+
+工作区干净 → `git merge-tree --write-tree` 预演（**4 个冲突，与实跑逐字一致**）→ `git merge origin/main` → 解冲突 → 合并提交 `e9ae73ec15`（同步后 0 behind / 66 ahead）。
+
+### 冲突与取舍（4 文件）
+
+| 文件 | 冲突 | 取舍 |
+|---|---|---|
+| `apps/desktop/electron/bootstrap-platform.test.ts` | 本地给 import 加了 `describeLinuxInputMethod`；上游删了 `bundledRuntimeImportCheck` 的 import 及其用例 | 并集：保留本地 import + 本地新增的 150 行 IME 用例，**去掉已无用的 `bundledRuntimeImportCheck` import**（否则 TS6133） |
+| `apps/desktop/electron/pool-spawn-coordinator.test.ts` | 上游 `a4f93ce250 test: purge low-value tests, lane js01 (202 removed)` 把 `// ── main.ts wiring ──` 那段**读源码的**测试与 100 子进程并发用例整段删掉；本地恰好在它后面**追加**了私有 `Admission policy` 块 | 取上游的删除（同时上游也删了该块依赖的 `fs`/`path`/`fileURLToPath` import —— 本次在跑 typecheck 前就发现，见坑 1），保留本地的 8 条 `Admission policy` 纯函数用例 |
+| `cli.py`（3 处） | 上游把 19k 行 god-file 拆出 **`hermes_cli/cli_init_mixin.py`（CLIInitMixin）** 与 **`hermes_cli/cli_tui_runtime_mixin.py`（CLITuiRuntimeMixin）**，删掉 cli.py 里的内联方法体 | 取上游的删除 + 上游类头并**在末尾补回 `CLIBridgeMixin`**；随后把本地私有改动**移植进新 mixin**（见下） |
+| `package-lock.json` | 本地 churn（`sax` 1.6.1 + `"dev": true`，全树 1362 包）⟷ 上游 1.6.0（1422 包） | **整份取上游**（`git checkout --theirs`）。本地那份是 `chore(deps): temp-disable npm min-release-age …` 造成的临时 churn，比上游少 55 个平台二进制（`@esbuild/*`、`@emnapi/*`）；根 `package.json` 本地只改了 `postinstall`（挂 assistant-ui 补丁），**不涉依赖图** |
+
+**本地私有改动必须移植**（上游搬迁后原位置已消失，这是本次唯一有脑力成本的部分）：
+
+| 私有内容 | 原来在哪 | 移植到 |
+|---|---|---|
+| `_bridge_platform` / `_bridge_chat_id` / `_bridge_inbox_stop` / `_bridge_progress_notified` 4 个字段 | `cli.py::_init_runtime_state` | `hermes_cli/cli_init_mixin.py::_init_runtime_state`（`preloaded_skills` 之后） |
+| bridge 自动恢复块（`bridge_subscription.json` → `config.yaml bridge:` 回退 → 提示 + `_bridge_start_inbox_watcher()`） | `cli.py::_tui_print_startup` 末尾 | `hermes_cli/cli_tui_runtime_mixin.py::_tui_print_startup` 末尾 |
+
+### 验证
+
+- 冲突标记全树清零（`git grep '^<<<<<<< ' HEAD`）；`py_compile` 10 个关键模块 OK；6 个模块 import 冒烟 OK
+- MRO 探针（`_init_runtime_state` → `cli_init_mixin`、`_tui_print_startup`/`_tui_process_loop` → `cli_tui_runtime_mixin`、bridge 方法 → `cli_bridge_mixin`；MRO 20 项无冲突）
+- 定向 pytest 5 文件（`test_weixin` / `test_weixin_secret_scope` / `test_gui_command` / `test_config_read_guard` / `test_interrupt_requeue_image_payload`）：**93 passed, 0 failed, 12 skipped**
+- desktop `npm ci`（`npm_config_engine_strict=false`）：1346 包、无 error、`package-lock.json` **零 churn**；`scripts/patch-assistant-ui-render-loop.mjs` 补丁重新落盘（`grep -c hermes-render-loop-patch …subscribable.js` = 1）；4 个新依赖均到位
+- desktop `npm run typecheck`（renderer + electron + e2e 三套）**rc=0**
+- desktop 定向 vitest **12 文件 / 119 用例全绿 rc=0**（`pool-spawn-coordinator`、`bootstrap-platform`、`pool-limits`、`pool-eviction`、`pool-stop`、`pool-reclamation`、`titlebar-overlay-width`、`window-controls`、`gateway-pool-saturation`、`gateway`、`gateway-spawn-priority`、`gateway-reconnect`）
+- `hermes_cli/web_dist` 重建（`_build_web_ui`，vite ✓，rc=0）
+- desktop 打包重建（`hermes desktop --build-only`，stage-and-swap）**rc=0**；`release/linux-unpacked/resources/install-stamp.json` 与 `build/install-stamp.json` 均 = **`e9ae73ec15c9`（dirty=false）**
+- **打包产物冒烟（真启动）**：`setsid … Hermes --disable-setuid-sandbox --ozone-platform=x11 </dev/null` → 窗口 `0x800004 "Hermes" 1379x914+372+81` **IsViewable**（与 09-20 基线几何一致）；`desktop.log` 完整 boot：`[pool-limits] maxBackends=7` → `[ime] ozone=x11 … im-module=fcitx session-dbus=yes gtk-im-modules=fcitx(gtk3)` → `[deeplink]` → `[env] merged login-shell PATH` → `HERMES_BACKEND_READY port=46135` → `[boot] Hermes backend is ready. Finalizing desktop startup`；冒烟后已清理（无残留 app/backend 进程、无残留窗口）
+
+### 三个坑（都值得记）
+
+1. **并集式解冲突的"隐形断头"**：`pool-spawn-coordinator.test.ts` 里上游删了 `fs`/`path`/`fileURLToPath` 三个 import，而我保留的那段内联块正好在用它们 —— 标记清零、肉眼像"并集成功"，只有 `tsc` 会报 TS2304。**这次是提交前跑 typecheck 才没漏**（09-20 那次是 `TS2339`）。结论不变：标记清零必须配 typecheck。
+2. **`nohup … &` 会让桌面应用卡死，且伪装成"合并回归"**：这样启动后应用只有一个 10x10 的占位窗口、**永远没有 renderer**、`--remote-debugging-port` 也不监听，看起来像把桌面改坏了。真因是应用启动时要跑一次登录 shell 探针（`/bin/bash -ilc …PATH…`），在**后台作业控制**下它试图读终端吃到 SIGTTIN → 进程状态 `T`（`do_signal_stop`）→ 主进程一直等它。前台手动跑同一条探针立刻 rc=0。**修法：`setsid bash -c 'exec …Hermes … < /dev/null > log 2>&1'`**，之后窗口/后端一切正常。以后冒烟一律用 setsid + stdin 接 /dev/null。
+3. **打包版拒绝 CDP**：`electron/dev-cdp.ts` 是硬门禁（"packaged build → always closed, whatever the env says"），在 `release/linux-unpacked` 上塞 `--remote-debugging-port` 是**无效**的（基线就存在，非本次引入）。所以 09-20 日志里那种"CDP 探针数可见元素"的做法对打包产物不可用，改为 `xwininfo -id … | grep 'Map State'` + `desktop.log` 的 boot 行来判定。
+
+### 顺带解决 / 新增的了解
+
+- **`/bridge` 那条长期红灯消失了**：`tests/hermes_cli/test_slash_dispatch_table.py` 被上游砍到只剩 2 个用例（3+/47−），`test_registry_names_resolve_into_the_table` 与 `OLD_CHAIN_COMMANDS` 全等守卫**已删除**。手工复核私有命令仍可达：`_slash_handler('bridge') == ('_handle_bridge_command', True)` 且方法可调用。09-16 起记了三次的"每次同步都会红"到此结案。
+- **本机 X11 dev 头缺失**：上游新增的原生 HUD 助手 `electron/native/hud-modifier-monitor-x11.c` 编译失败（`X11/Xlib.h: No such file`，本机无 `libx11-dev`），`build-hud-modifier-monitor.mjs` 捕获后降级（`modifier tap unavailable for this target`），打包 **rc 仍为 0**，非致命。
+- 5 个 stash 仍未清理（最老 2026-07-08）。
+
+### 待办（本次未做，需人工决定）
+
+- **仓库里还跑着旧代码的网关/大盘**：`venv/bin/python -m hermes_cli.main gateway run`（pid 474）与 `dashboard --port 9119`（pid 475）是**今天 20:20** 启动的，模块已是同步前的版本 —— 正是启动器警告的 "mixed sys.modules"。需要 `hermes gateway restart` + 重启 dashboard（**未自动执行**：那是用户正在用的微信桥）。这同时会让 `tests/hermes_cli/test_dashboard_auth_gate.py` 继续红（9119 被自己占用）。
+- profile-scope advisory：本地私有的 `hermes_cli/cli_bridge_mixin.py` 命中 3 条 P06/C5（`WEIXIN_TOKEN`/`WEIXIN_ACCOUNT_ID`/`WEIXIN_BASE_URL` 的 **env 回退**）——它是**先**用 sanctioned 的 `load_config_readonly()` 读 config.yaml，env 只是最后兜底；且该 mixin 只在 standalone CLI/TUI 进程里跑（该进程里 environ 就是当前 profile），属 lint 自述的"合法站点"。非本次合并引入，暂不动。
+
+### 落盘与推送
+
+| 提交 | 内容 |
+|---|---|
+| `e9ae73ec15` | `Merge remote-tracking branch 'origin/main'`（3194 个上游提交，4 处冲突） |
+
+收尾状态：落后 `origin/main` **0**、领先 **66**；工作区干净（`npm ci` 后 `package-lock.json` 零 churn）；临时探针（`/tmp/probe_*.py`、`/tmp/probe_cdp.cjs`）与日志已清。
+
+### 下次同步的注意点
+
+1. **cli.py 已被上游拆成 mixin**：以后动 CLI 私有代码，**改 `hermes_cli/cli_*_mixin.py`，不要改 `cli.py`** —— cli.py 现在只剩类头与少量未搬迁的方法。bridge 的教训（09-16 那次就是"留在 cli.py 里等着被重构撞"）已经写进 `cli_bridge_mixin.py` 的 docstring。
+2. **上游在批量清洗低价值/读源码的测试**（`a4f93ce250`，一次删 202 个）。别把删掉的 source-scanning 断言加回来 —— 项目 `AGENTS.md` 明令禁止"测试里读源码"。
+3. **冒烟用 `setsid … < /dev/null`**（坑 2）；**打包版没有 CDP**（坑 3）。
+4. **同步会换掉正在运行的网关代码**：同步前先记下 gateway/dashboard/desktop 的 PID，同步后重启它们，否则一直在跑旧模块。
+5. 验证节奏照旧：不要同时压 pytest 大盘 + vitest + tsc；本次是 pytest（93）→ tsc → vitest（119）→ web build → desktop build 全串行，零假阳性。
+
+---
+
 ## 2026-09-20: 上游同步至 4d14aaf477（2638 → 0）
 
 ### 背景
