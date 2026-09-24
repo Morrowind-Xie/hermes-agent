@@ -65,19 +65,14 @@ TOKENHUB_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 NEBIUS_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 SOLAR_EFFORTS: tuple[str, ...] = ("low", "medium", "high")
 
-#: GLM-5.2 native knob: exactly ``high`` (its minimum thinking level) and ``max``. ``xhigh``
-#: requests the top tier. GLM-5.3 shares the wire but only accepts ``low``/``high``/``max`` —
-#: see ``GLM53_EFFORTS``.
+#: GLM-5.2 native knob: exactly ``high`` (its minimum thinking level) and ``max``; GLM-5.3
+#: widens it to a graded scale (live-verified, monotonic). ``xhigh`` requests the top tier.
 GLM52_EFFORTS: tuple[str, ...] = ("high", "max")
 GLM52_OVERRIDES: dict[str, str] = {"xhigh": "max"}
-#: GLM-5.3 is always-thinking: it rejects BOTH ``thinking: {"type": "disabled"}`` and
-#: ``reasoning_effort: "medium"`` with HTTP 400 ("该模型始终思考，不支持关闭思考；请使用 low、
-#: high 或 max" — live-verified 2026-08-31 on open.bigmodel.cn). The graded
-#: low/medium/high/max scale first reported on api.z.ai (#91789, 2026-08-21) has since
-#: narrowed to three levels, so ``medium`` clamps DOWN to ``low``. ``xhigh`` requests the
-#: top tier. A request that explicitly turns reasoning off degrades to this floor rather
-#: than leaving the server's (higher) default in force — zai's profile does that mapping.
-GLM53_EFFORTS: tuple[str, ...] = ("low", "high", "max")
+# : GLM-5.3 widens the knob to a graded low/medium/high/max scale — verified : live on
+# api.z.ai/api/coding/paas/v4 (issue #91789, 2026-08-21): every : level accepted with monotonic
+# reasoning-token scaling (low=4, medium=11, : high=98, max=125 on the probe prompt).
+GLM53_EFFORTS: tuple[str, ...] = ("low", "medium", "high", "max")
 GLM53_OVERRIDES: dict[str, str] = {"xhigh": "max"}
 
 #: DeepSeek V4 OpenAI-compat endpoint; ``xhigh`` requests the top tier.

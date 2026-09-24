@@ -29,28 +29,15 @@ def _has_token(model: str | None, tokens: tuple[str, ...]) -> bool:
 
 
 def _glm_5_2_reasoning_effort(reasoning_config: dict | None, *, model: str | None = None) -> str | None:
-    """Hermes effort -> GLM vocabulary (5.2: high/max; 5.3: low/high/max). Below-floor
-    efforts clamp to the floor; disabled/unset leaves the server default.
-
-    GLM-5.3 is always-thinking, so it cannot honour an explicit "off": that request
-    degrades to its floor (``low``) instead of emitting the 400-ing disable marker or
-    silently leaving the higher server default in force. A config that never expressed
-    an effort stays unset in both cases.
-    """
+    """Hermes effort -> GLM vocabulary (5.2: high/max; 5.3: low..max). Below-floor
+    efforts clamp to the floor; disabled/unset leaves the server default."""
     effort = re_.requested_effort(reasoning_config)
+    if effort is None or effort == "none":
+        return None
     if _has_token(model, _GLM_5_3_TOKENS):
         efforts, overrides, floor = re_.GLM53_EFFORTS, re_.GLM53_OVERRIDES, "low"
-        explicitly_off = isinstance(reasoning_config, dict) and (
-            reasoning_config.get("enabled") is False or effort == "none"
-        )
-        if explicitly_off:
-            return floor
-        if effort is None or effort == "none":
-            return None
     else:
         efforts, overrides, floor = re_.GLM52_EFFORTS, re_.GLM52_OVERRIDES, "high"
-        if effort is None or effort == "none":
-            return None
     clamped = re_.clamp_effort(effort, efforts, overrides)
     return clamped if clamped in efforts else floor
 
@@ -69,11 +56,7 @@ class ZaiProfile(ProviderProfile):
         # Only emit when the user expressed a preference (server default = enabled).
         if isinstance(reasoning_config, dict):
             enabled = reasoning_config.get("enabled") is not False
-            # GLM-5.3 is always-thinking: ``thinking: {"type": "disabled"}`` 400s
-            # ("该模型始终思考，不支持关闭思考"), so never emit the disable marker for
-            # it — the effort knob below degrades an off request to its floor instead.
-            if enabled or not _has_token(model, _GLM_5_3_TOKENS):
-                extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
+            extra_body["thinking"] = {"type": "enabled" if enabled else "disabled"}
         if is_5_2:
             effort = _glm_5_2_reasoning_effort(reasoning_config, model=model)
             if effort is not None:
