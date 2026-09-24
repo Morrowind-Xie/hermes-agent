@@ -8,7 +8,7 @@
 
 ### 背景
 
-`main` 落后 `origin/main` **3194** 个提交（分叉点 `4d14aaf477`，即 09-20 同步的上游 tip；上游 09-20→09-24 四天推了 3194 个，≈800/天，是迄今最猛的一段）、领先 65 个（本地私有工作）。新 tag **`v2026.9.21`、`v2026.9.24`**（= v0.21.5，`f97608f178`）。`pyproject.toml` 0.21.3 → **0.21.5** 且 `uv.lock` +100/−123 → 需 `uv sync`；`apps/desktop/package.json` 版本仍是 0.17.6，但**新增了依赖**（`@novnc/novnc@1.7.0`、`dbus-native@0.15.2`、`https-proxy-agent@7.0.6`、`proxy-from-env@2.1.0`、`@types/proxy-from-env@1.0.4`）→ 必须 `npm ci`；`web/src` 58 文件变 → 重建 `hermes_cli/web_dist`。规模 6154 files / +279101 −182617（`apps/desktop` 一个目录就占 1444 文件）。
+`main` 落后 `origin/main` **3194** 个提交（分叉点 `4d14aaf477`，即 09-20 同步的上游 tip；上游 09-20→09-24 四天推了 3194 个，≈800/天，是迄今最猛的一段）、领先 65 个（本地私有工作）。新 tag **`v2026.9.21`、`v2026.9.24`**（= v0.21.5，`f97608f178`）。`pyproject.toml` 0.21.3 → **0.21.5** 且 `uv.lock` +100/−123（`uvicorn[standard]` 被拆成 `uvicorn`+`httptools`+`watchfiles`、`uvloop` 改为 `[uvloop]` extra）—— 但本机 `venv` 与 `.venv` 实测均已满足新约束（`uvicorn 0.41.0` / `uvloop 0.22.1` / `httptools 0.7.1` / `watchfiles 1.1.1`），`uv lock --check` rc=0 → **本次无需 `uv sync`**；`apps/desktop/package.json` 版本仍是 0.17.6，但**新增了依赖**（`@novnc/novnc@1.7.0`、`dbus-native@0.15.2`、`https-proxy-agent@7.0.6`、`proxy-from-env@2.1.0`、`@types/proxy-from-env@1.0.4`）→ 必须 `npm ci`；`web/src` 58 文件变 → 重建 `hermes_cli/web_dist`。规模 6154 files / +279101 −182617（`apps/desktop` 一个目录就占 1444 文件）。
 
 ### 流程
 
