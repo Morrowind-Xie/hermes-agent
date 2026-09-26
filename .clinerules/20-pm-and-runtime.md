@@ -55,8 +55,9 @@ hermes: no dependency environment is committed for this install; run `hermes pm 
 - 官方激活：`source ./activate`（bash/zsh）或 `. .\activate.ps1`；`deactivate` 精确还原。
 - **禁止**用裸 `pip`/`uv` 改 Hermes 环境（上游 AGENTS.md 规则）；PM 拥有依赖，改 `pyproject.toml` 后跑 `hermes pm lock`。
 - 上游要求 Python **3.14**（`.python-version`）；`[tool.uv] environments = ["python_version >= '3.14'"]`。
-- **本机 PM 测试环境尚未建**（`~/.hermes/installs/<key>/test-environment` 不存在），所以定向 pytest 目前走遗留 venv：`./venv/bin/python -m pytest …` —— 这是**已知偏差（CI 等价性未覆盖）**，要在日志里注明。补建方式：`setup-hermes.sh` 或首次 `scripts/run_tests.sh`（会下载 CPython 3.14 并装 extras=`all`，有体量）。
-- 新 `scripts/run_tests.sh` 不再探测 `.venv`/`venv`，而是激活 PM 测试环境；测试环境建好前直接用它可能失败。
+- **测试环境已建（2026-09-26 16:24）**：`~/.hermes/installs/<key>/test-environment`（Python 3.14 + `dev`+`test` 组 + pytest）。**直接跑 `scripts/run_tests.sh <paths>` 即可** —— 它会在环境缺失/过期时自动激活构建（实测：一次运行同时建好 PM 环境与测试环境）。
+- **不要再用遗留 venv 跑测试**（`venv` 3.12 / `.venv` 3.11）：R13 的 3.14 site-packages 注入会让它们崩在二进制扩展上。
+- 实测基线（2026-09-26）：desktop 相关 6 个文件 **105 passed / 0 failed / 15 skipped**（跳过项为 macos/windows lane，属预期）；runner 自报 CI 等价形态 `(TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)`、`-j 12`、per-file subprocess 隔离。
 
 ## R11 · 记录义务
 
