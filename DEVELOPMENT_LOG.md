@@ -4,6 +4,52 @@
 
 ---
 
+## 2026-09-26（第二轮）: 上游同步至 e13b5e71ef（288 → 0）
+
+### 背景
+
+上一轮（同日）同步到 `e62a47ab68` 后仅数小时，上游又推了 **288 个节点**（283 内容提交 + 5 合并接点；first-parent 277），tip **`e13b5e71ef`** `fix(gateway): bind the secondary callback scope without on-loop secret hydration`。规模 **575 files / +26075 −3099** —— 只有上一轮的 **12% 文件量、6.8% 插入量**，是典型的"补丁波"：提交类型 `fix 209 / test 42 / chore 10 / refactor 9 / **feat 仅 7**`，scope `desktop 106`、`tui 15`、`gateway 15`、`agent 13`；日期分布 09-24 4 / 09-25 254 / 09-26 30。**无新稳定 tag**（仍是 `v2026.9.24`），新增的全是候选/废弃候选：`rc.9 ~ rc.14-v0.21.5` + `abandoned-rc.8 ~ abandoned-rc.13-v0.21.5` —— 一天内 6 个 rc + 6 个废弃，说明**发布流水线在密集试切**。这一波**没有动** `AGENTS.md` / `scripts/` / `tests/conftest.py`。
+
+### 流程
+
+预检（工作区干净、`main == fork/main` 0/0、记下 PID 475 / 428828 / 447717）→ `git merge-tree` 预演 **0 冲突** → `git merge origin/main` → **实跑同样零冲突、零人工解冲突** → 合并提交 **`ea93e6ad79`**。这是迄今最省力的一次同步：**无冲突、无依赖变更、无需重建**。
+
+### 本波重点（按与本 fork 相关度）
+
+1. **Gateway 二级 profile scope 三连修**（含 tip 那条）：`bind the secondary callback scope without on-loop secret hydration`、`enter the secondary profile scope per callback, not from a configure-time snapshot`、`authorize a secondary bot's callbacks under its own profile scope` —— 正是 AGENTS.md § profile scope 那条不变量（"运行在 turn 之外的代码必须显式绑定所属 profile"）。**我们跑着 gateway + 微信桥，这条是本次同步的主要收益。**
+2. **`tui_gateway` busy/queue/lease 修复群**（约 10 条）：busy-queued prompt 在 accept 时持久化、drain 时重排所有排队行（不只 dispatched 那一条）、压缩在飞时排队 follow-up、reap 陈旧 deferred 租约（#62823 zombie slot）、readiness 探针单飞 + 用时钟偏移度量 reaper 睡眠。→ 与我们的 **TUI 接管模式**直接相关。
+3. **agent 的"误报"类修复**：`stop reporting transport/router truncation as an output-length limit (#91717)`、`clean-EOF tool-call retry exhaustion no longer blames the network (#102766)`、`close one-shot AIAgents on every exit path`、`protect the runtime's own interpreter from agent deletes`、`close non-interrupted tool-tail turns with a visible response`。
+4. **mcp**：`resolve bare uv/uvx under GUI-style PATHs (#37589)`、`move uv/uvx known-dir table into hermes_platform resolver`（呼应 AGENTS.md"资源查找统一走 `hermes_platform`"，`tests/test_managed_runtime_resolution.py` 是它的守卫）、`budget discovery-thread GIL so agent build fits the 30s wait`。
+5. 其余：`slack 6` / `tts 5` / `codex 5` / `feat(tui): native terminal mode`、`feat(desktop): PageUp/PageDown 翻页`、共享 `Reel/Masonry/Button chip`、Capabilities 目录卡片恢复、`fix(pm): match recorded extras to declarations by normalized name` + `prune recorded extras the tree no longer declares`。
+
+### 验证（全串行）
+
+- 冲突标记 `<<<<<<<` 全树**零**；`py_compile` 5 个关键模块 OK
+- **私有 delta 逐行存活校验**（范围收紧为 `e62a47ab68..39b2a067bd`，即"我们相对上次同步点的全部私有工作"）：**missing_total=0**
+- fork 本地文件仍在：`cli_bridge_mixin.py`、`pool-eviction.ts`、`pool-eviction.test.ts`、`scripts/patch-assistant-ui-render-loop.mjs`；私有链路 `selectPoolEvictions`（`main.ts:376` import + `11786` 调用）、`localBackendSlotsThatMayFree`、`decideLocalBackendAdmission`、assistant-ui 补丁标记、`_bridge_*` 字段全部存活 —— **上游这波把 `main.ts` 改了 219+/69− 也未撞掉私有链路**
+- import 冒烟 9/9（含新增 `tui_gateway.server`）；MRO 20 项落点不变；`dispatch 44` 条、`/bridge -> ('_handle_bridge_command', True)`
+- 定向 pytest 8 文件（fork 5 文件集 + 本波重点区 `tui_gateway/{test_deferred_lease_reaper,test_queued_prompt_persistence,test_readiness_singleflight}`）：**112 passed, 13 skipped**
+- `uv lock --check` **rc=0**（仍按 CPython 3.14.6 解析 331 包）
+- desktop `npm run typecheck`（4 套）**rc=0 / 0 errors**（上一轮就是这一步抓到 `pool-eviction` 被删 → 本波零错误说明未再被删模块）
+- desktop 定向 vitest **12 文件 / 119 用例全绿 rc=0**；desktop `npm run build` **rc=0**
+- **无需 `npm ci` / `uv sync` / web 重建**：`pyproject.toml`、`uv.lock`、`package-lock.json`、`apps/desktop/package.json`、整个 `web/` 本波**零改动**
+
+### 下次同步的注意点
+
+1. **优先等稳定 tag**：这波 rc.9→rc.14 六个候选全部废弃重切，说明正在试发；钉在 tag 上可省掉试发期间的来回改动。（本次是因为 gateway profile-scope 修复对本机有实质收益才提前吃。）
+2. **零文本冲突 ≠ 零复核**：本波有 **12 个两侧都改**的文件，全部自动合并成功但需语义复核 —— `hermes_cli/main_desktop.py`(+135)、`tests/hermes_cli/test_gui_command.py`(+206)、`apps/desktop/electron/main.ts`(219/69−)、`agent/auxiliary_client.py`(+70)、`gateway/run_turn.py`(+4) 与 7 个 `apps/desktop/src/i18n/*.ts`。其中前两个正是上一轮刚移植过的私有 delta 落点。
+3. **typecheck 是必需步骤**（上一轮教训）：上游会成批删除"它自己树里没人引用"的模块，本波又新增/改动了大量 electron 文件 —— fork 本地伴随文件（`pool-eviction.ts` 等）只有 typecheck/import 能发现丢失。
+4. `platforms()` marker / PM runner / 3.14 那套结论在本波**未发生变化**（`scripts/`、`AGENTS.md`、`conftest.py` 零改动）。
+5. 验证节奏照旧**全串行**；本轮 `web/` 与依赖零改动时可直接跳过 `npm ci` / web build，只跑 pytest → uv check → tsc → vitest → desktop build。
+
+### 待办（未自动执行）
+
+1. **重启仍在跑旧模块的进程**：gateway `428828`、dashboard `475`（+ `mcp_death_supervisor 855`）、desktop `447717`/`447762`。**未自动重启**（用户正在用的微信桥）。
+2. **建 PM 测试环境**（`setup-hermes.sh` 或首次 `scripts/run_tests.sh`）；本次定向 pytest 仍走遗留 `venv`，CI 等价性未覆盖。
+3. `git push fork main`。
+
+---
+
 ## 2026-09-26: 上游同步至 e62a47ab68（1971 → 0）
 
 ### 背景
