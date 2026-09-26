@@ -4,6 +4,50 @@
 
 ---
 
+## 2026-09-26（第五轮）: 合并残留的 lint error —— 暴露验证链缺口
+
+### 现象与定位
+
+用户报「`apps/desktop/electron` 里有文件报错」。定位到 **1 个 eslint error**（不是 TS 错）：
+
+```
+apps/desktop/electron/pool-spawn-coordinator.test.ts
+  10:3  error  Expected "localBackendPoolSaturatedMessage" to come before
+               "LocalBackendSlotWaitTimeoutError"   perfectionist/sort-named-imports
+```
+
+**根因**：自动合并把两侧的 named import 拼成一份列表，顺序不再满足上游的 `perfectionist/sort-named-imports` 规则 —— 而这份 import 列表**正是本地私有改动（`Admission policy` 测试块）所在的文件**，两侧都动过它。
+
+### 为什么前三轮同步的验证链没抓到
+
+链里有 `typecheck` 与 vitest，**但没有 eslint**：
+
+- `tsc` 对 import 顺序**不报**（顺序不影响类型）
+- vitest **全绿**（顺序不影响运行）
+- 所以这个 error 只会在编辑器里冒出来，而不是在我们的验证里
+
+这是**验证链的真实缺口**，不是本次合并独有的偶然。
+
+### 处置
+
+1. 交换两行（`localBackendPoolSaturatedMessage` 提到 `LocalBackendSlotWaitTimeoutError` 之前）
+2. 复核：`npx eslint src/ electron/ --quiet` → **error 行数 0**（整个 desktop lint 范围）；该文件 vitest **26 passed**
+3. 提交 `82f87265a2 style(desktop): restore named-import order broken by the upstream merge`
+
+### 规则更新（防复发）
+
+`.clinerules/00-upstream-sync.md`：
+
+- **R2 步骤 6**：验证链改为 pytest → `uv lock --check` →（如需要）`npm ci` → `typecheck` → **`eslint`** → 定向 vitest →（如需要）web build → desktop build
+- **R3 新增「`eslint` 不可跳」**：给出命令 `cd apps/desktop && npx eslint src/ electron/ --quiet`（error 行数为 0 才算过），并注明若本波动了 `web/`、`ui-tui/` 也要跑对应 workspace 的 lint
+
+### 下次同步的注意点
+
+- 合并后**必须跑一次 eslint**；这是继 typecheck 之后第二个"只有它能发现"的守卫（typecheck 抓模块被删，eslint 抓合并打乱的 import 顺序 / 格式）。
+- 凡"两侧都改"的文件（`10-fork-private-deltas.md` R6 清单），除作用域与语义外，**再加一项：格式化/lint 是否仍合规**。
+
+---
+
 ## 2026-09-26（第四轮）: 重启 gateway 暴露「PM 依赖环境未提交」（已用 drop-in 恢复）
 
 ### 触发

@@ -34,13 +34,18 @@ git merge-base --is-ancestor "$tag" HEAD && echo "SYNCED  $tag" || echo "NEW STA
 3. **合并**：`git merge origin/main --no-edit`，逐文件解冲突（原则见 `10-fork-private-deltas.md`）。
 4. **逐行存活校验**（R5，不可省）：确认本地私有改动没被静默丢弃。
 5. **语义复核**：按 `10-fork-private-deltas.md` 的重叠文件清单逐个查（**零文本冲突 ≠ 零复核**）。
-6. **全串行验证链**：pytest → `uv lock --check` →（如需要）`npm ci` → `typecheck` → 定向 vitest →（如需要）web build → desktop build。
+6. **全串行验证链**：pytest → `uv lock --check` →（如需要）`npm ci` → `typecheck` → **`eslint`** → 定向 vitest →（如需要）web build → desktop build。
 7. **写日志 + 推送**：`DEVELOPMENT_LOG.md` 顶部新增条目，然后 `git push fork main`。
 
 ## R3 · 验证节奏与不可跳过的项
 
 - **全串行**：禁止同时压 pytest + vitest + tsc + build（并发会产生假阳性）。
 - **`typecheck` 不可跳**：上游会成批删除"它自己树里没人引用"的模块（实测删过 `pool-eviction.ts`、`gitlock.ts`、`deep-link-route.ts`、`update-remote.ts`），这类丢失**只有 typecheck/import 能发现**。
+- **`eslint` 不可跳**：自动合并会把两侧的 named import 拼成一份列表而打乱 `perfectionist/sort-named-imports` 要求的顺序 —— `tsc` 与 vitest **都不报**（实测 2026-09-26：`pool-spawn-coordinator.test.ts` 的 import 顺序被合并打乱，typecheck rc=0、vitest 全绿，只有 eslint 报 error）。命令：
+  ```bash
+  cd apps/desktop && npx eslint src/ electron/ --quiet   # error 行数为 0 才算过
+  ```
+  同理，若本波改动了 `web/` 或 `ui-tui/`，也跑一次对应 workspace 的 lint（根 `npm run --ws check` 含 typecheck+test+lint，较重，按需）。
 - 冲突标记必须清零：`git grep -c '^<<<<<<< ' | wc -l` → `0`。
 - 判"要不要 `npm ci` / 要不要重建 web" **看 `git diff --stat` 与 lockfile 实际差异，不要看版本号** —— 上游主线版本恒为 `0.0.0`（真实身份 = release tag + `install-stamp.json`）。
 - 定向 pytest：跑 `10-fork-private-deltas.md` 的常规集，**再加**本波改动热点目录对应的测试文件（上游新增的测试文件按文件名直接加）。
