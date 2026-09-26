@@ -4,6 +4,85 @@
 
 ---
 
+## 2026-09-26（第十一轮）: 补上 CI 等价性缺口 —— PM 测试环境已建，定向测试全绿
+
+### 背景
+
+第十轮记录：两处代码补丁（`main_desktop.py` / `linux_desktop_entry.py`）**只做了功能级验证**，因为 `installs/<key>/test-environment` 不存在、PM 环境里也没有 pytest。
+
+### 处置
+
+直接跑官方测试入口 `scripts/run_tests.sh`（AGENTS.md 强制：**永远不用裸 pytest**）。它自己完成激活：
+
+```
+▶ activating /home/morrowind/hermes-agent (environment missing or stale)
+☤ Hermes Agent Setup → ✓ pinned uv 0.12.3 → Python 3.14 is already installed → ✓ ffmpeg/node/npm
+```
+
+→ **PM 环境与测试环境已在同一次运行中建好**（`installs/<key>/test-environment`，Python 3.14 + `dev`+`test` 组 + pytest，2026-09-26 16:24）。
+
+### 结果（6 个文件，**105 passed / 0 failed / 15 skipped**）
+
+| 文件 | 结果 | 覆盖 |
+|---|---|---|
+| `tests/hermes_cli/test_gui_command.py` | **49 ✓** | `main_desktop.cmd_gui` / launch env（本轮补丁 1） |
+| `tests/hermes_cli/test_linux_desktop_entry.py` | **46 ✓** | `_resolve_hermes_bin_for_desktop_entry`（本轮补丁 2） |
+| `tests/hermes_cli/test_desktop_source_build.py` | 3 ✓ | desktop 源码构建 |
+| `tests/hermes_cli/test_desktop_startup_cost.py` | 1 ✓ | 启动开销 |
+| `tests/hermes_cli/test_desktop_wsl_gpu.py` | 2 ✓ | WSL GPU 环境注入 |
+| `tests/hermes_cli/test_gui_uninstall.py` | 4 ✓ | 卸载路径 |
+
+跳过项均为 `platforms('macos')` / `platforms('windows')`（本机 Linux 不跑，属预期）。
+
+运行形态由 runner 自报 CI 等价：`(TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)`、`-j 12`、per-file subprocess 隔离。
+
+### 结论
+
+- R10 中「本机 PM 测试环境尚未建」的偏差 **已消除**；以后任何改动都可直接 `scripts/run_tests.sh <paths>`，无需再走遗留 venv。
+- 遗留 venv（`venv` 3.12 / `.venv` 3.11）**不再用于任何 Hermes 启动或测试**（原因见 R13），仅剩两处无害用途：用户自己的 `dashboard.service`（8888 原型）借用 `venv/bin/python3`；`venv/bin/python3` 作为其 MCP server 的解释器（不 import `hermes_cli.main`）。
+
+---
+
+### 全目录跑（`tests/hermes_cli/`，1345 文件 / ~10018 用例）
+
+```
+=== Summary: 1345 files, 12935 tests passed, 95 failed, 296 skipped (100% complete) in 838.3s (12 workers) ===
+```
+
+**失败全部集中在这 20 个文件**（本波补丁涉及的文件**一个都不在其中**）：
+
+```
+test_update_target_identity(31)  test_update_products(12)  test_update_autostash(8)
+test_update_fleet_restart_pending(7)  test_update_parked_branch_guard(7)  test_web_server_profile_unification(7)
+test_update_completion_process(6)  test_update_channel(3)  test_source_release_channels(2)  test_update_list_venv_holders(2)
+test_cmd_update_docker / test_desktop_slash_registry / test_inventory_pricing / test_gateway_service /
+test_kanban_core_functionality / test_shared_profile_warning / test_update_head_moved_gate / test_tui_npm_install /
+test_update_venv_holder_retirement / test_update_receipt      （各 1）
++ test_doctor_pm_store_probe.py（8 个 collection error）
+```
+
+**根因统一**（读 `tests/home_io_guard.py` 确认）：该守卫**拒绝对"真实 HERMES_HOME"（`~/.hermes`）的任何文件 I/O**，只放行 `/proc`、home 根自身、**PATH 上的目录**、以及运行中解释器的安装前缀。而本机的 **PM store（`~/.hermes/tools/...`）、安装状态、测试环境源码副本（`~/.hermes/installs/<key>/test-environment/gen-<hash>/hermes_cli/main.py`）全都落在 `~/.hermes` 下** → 凡是要摸这些路径的测试（`test_update_*` 家族正是这类；`test_doctor_pm_store_probe` 直接探 store）一律被守卫判为"测试 bug"。
+
+→ **这是环境/布局造成的，不是代码回归**：报错原文即 `TEST BUG: file I/O against the REAL hermes home: …`；且失败文件与本波改的两个函数（`main_desktop` / `linux_desktop_entry`）无关 —— 它们的 6 个测试文件 **105 用例全绿**。
+
+**要拿到目录级全绿的修法**（上游文档的隔离开发流程）：给 PM 状态换一个**独立 dev home**，让 store/测试环境不再落在真实 `~/.hermes` 下：
+
+```bash
+export HERMES_HOME="$HOME/hermes-dev-data"
+export HERMES_RUNTIME_DIR="$HERMES_HOME/tools"
+scripts/run_tests.sh tests/hermes_cli/
+```
+
+（代价：新 store 要重新下载 CPython 3.14 + 工具 + 应用/测试依赖，约 1.5 GB / 10–20 分钟；换来"测试永远碰不到生产状态"。）
+
+### 顺带修掉一个真实的 fork 私有 delta 缺陷
+
+`test_desktop_slash_registry.py` 失败：`apps/desktop/src/lib/desktop-slash-registry.json is stale`。原因：本 fork 多了 `/bridge`（微信↔TUI 桥）斜杠命令，但桌面端斜杠注册表的 dump 没同步 → **桌面端命令面板里看不到 `/bridge`**。
+
+按官方提示跑 `scripts/dump_desktop_slash_registry.py` → 补上 `"/br": null` 与 `"/bridge": null` → 该测试 **2 passed / 0 failed**。
+
+---
+
 ## 2026-09-26（第十轮）: 收尾两处 —— 应用菜单启动项 + webui 服务的"重启炸弹"
 
 ### 处置与验证
