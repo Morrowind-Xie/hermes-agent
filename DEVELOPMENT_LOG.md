@@ -4,6 +4,56 @@
 
 ---
 
+## 2026-09-26（第十五轮）: 7 个钉钉机器人全部接通（default + 6 个 profile）
+
+### 处置
+
+- 3 组凭据批量写入各自 `.env`（600）：music / exam / fitness（work / invest / coding / default 前几轮已接）。**每个 profile 的 6 个 FEISHU 键全部保留**（`DINGTALK键=3, FEISHU键保留=6`）。
+- **写入前逐把验钥匙**：3 把全部 `accessToken 成功 ✓`。
+- 预检无阻断 → **一次重启**全部生效。回滚包：`/tmp/rb/dingtalk-last3-221735/`（含 default/work/invest/coding 更早的回滚包）。
+
+### 验证结果
+
+```
+pid 2868590 | gateway_state: running | 平台数: 18
+钉钉条目: 7（全部 connected）
+  dingtalk(default) · work:dingtalk · invest:dingtalk · coding:dingtalk
+  exam:dingtalk · fitness:dingtalk · music:dingtalk
+
+6 个子 profile 的连接时间: 22:19:21 ~ 22:19:48
+握手超时(4 分钟): 0     网络异常: 1（一次性，非持续）
+飞书条目: 7（仍 connected，未被影响）
+```
+
+### 最终名录（钉钉）
+
+| profile | AppKey (Client ID) |
+|---|---|
+| default | `ding3sahzfbqei2hagod` |
+| work | `dingwfftq0f76oymsg5v` |
+| invest | `ding8ccvsqudtyf7jgb2` |
+| coding | `dingurnza8jc6hqtxfre` |
+| exam | `dinghr7rqfs6yd5tcvpz` |
+| fitness | `ding7do2feuubttuyu9a` |
+| music | `dingevhxn244tehtr3ev`(以实际写入为准) |
+
+> AgentId 未使用：插件默认 `robot_code = client_id`（`adapter.py:212`）。
+
+### 可复用结论
+
+- **多钉钉机器人（7 个）共存稳定**：0 握手超时、0 持续网络异常；若误用同一凭据会因"同 app 仅一条长连接"互相踢。
+- 启动耗时：7 个适配器 + 7 个飞书适配器，从 systemd 启动到 `gateway_state: running` 约 **60–90 秒**（关机 drain 也需 ~35 秒，因每个钉钉适配器断开各等 5s）→ **重启不要只等 30 秒就判失败**。
+- 验证钉钉看 `[Dingtalk] Connected via Stream Mode`（各 profile 自己的 `logs/gateway.log`）。
+
+### 待办
+
+1. **白名单收紧**：7 个 `.env` 的 `DINGTALK_ALLOW_ALL_USERS=true` → `DINGTALK_ALLOWED_USERS=MW`。
+2. 主动推送（定时任务）需静态机器人 webhook（`DINGTALK_WEBHOOK_URL`），可选。
+3. 飞书 6 个 bot"连上但收不到"仍未定性（用户已决定暂停）。
+4. 用户逐个私聊 7 个钉钉机器人做端到端确认。
+
+---
+
 ## 2026-09-26（第十四轮）: 第二个钉钉机器人（work）接通 —— 多机器人共存验证通过
 
 ### 处置
