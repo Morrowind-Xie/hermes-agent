@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-09-26（第六轮）: PM 安装迁移 + multiplex 折叠 —— 7 个 profile 共用一个网关
+
+> 触发：用户问「PM 迁移是干嘛用的」→ 结论是"必须先做，否则飞书 SDK 装不上、任何 PM 启动路径都死"。用户授权「全做，但要能回滚、保可用性」。
+
+### 背景（可复算的原始量）
+
+- 预检 `hermes gateway migrate --multiplex --dry-run`：**6 条 blockers**，全是同一件事 —— `WEIXIN_TOKEN` 被逐字复制到 **7 处**（`~/.hermes/.env` + 6 个 profile 的 `.env`），指纹全是 `454fa4d0`；`WEIXIN_ACCOUNT_ID` 同样 7 份（`65ef6991`）。
+- **只改 `.env` 无效**：第 2 次 dry-run 仍 6 条 blockers。真正来源是**每个 profile 的 `config.yaml` 里 `platforms.weixin.token` 明文**（6 个文件，约 607-611 行）。CLI 的修复提示只命名了 env key，**没提配置层** —— 这个坑值得记。
+- PM 安装态实测：`~/.hermes/installs/7009bded74a48963/` 的**引导层已在**（`bootstrap/default.json`: `bootstrappedAt=2026-09-26T11:31:48`, `identity=7611d47d39`；store 里 python-3.14.7+uv+tirith 都在），但 `pm-runtime/generations/063cf8e9…` **只有 2.5 MB / site-packages 11 项**（`_virtualenv` `packaging` `ruamel.yaml` `tomli_w` `truststore`）—— 那是 PM 自举环境，**不是** Hermes 依赖树。
+
+### 流程（每步先建回滚包，动完立刻验活）
+
+回滚包：`/tmp/rb/20260926-121939/`（8 个 `.env`、7 个 `config.yaml`、unit、drop-in、`gateway_state.json`、状态快照）+ `/tmp/rb/dropin.conf.disabled`。
+
+1. **规则文档修正**：`20-pm-and-runtime.md` R8（旧文写「`installs/<key>/` 不存在」是**错的**）、R9 删除条件改指**仓库内** shim、新增 R12 回滚包约定。
+2. **weixin 解绑**：6 个 profile 的 `.env` 注释掉 2 行（带 `# [fork 2026-09-26] unbound ...` 标记）+ 6 个 profile 的 `config.yaml` 把 `platforms.weixin.enabled` 改 `false`（**保留 token 值**，单字可逆）。**不动 default**。→ 第 3 次 dry-run **0 blockers**。
+   - 选 `enabled: false` 而不是删块：`cli_bridge_mixin.py:210` 的 bridge 镜像走 `send_weixin_direct(...)`，只读 config 的 token、**不检查 `enabled`** → 微信镜像不受影响（已核对代码路径）。
+3. **`hermes pm install`**：产出 `installs/<key>/environments/1905cc7618f74e799d6ff81af48779b9/venv`（**384 MB / 215 包**）+ `inputs/{pyproject.toml,uv.lock,pm/lock.json}` + `facts.json`；store 新增 node-26.7.0 / npm-12.0.2 / ffmpeg-9.0.1 / ripgrep-15.2.0 / agent-browser-0.26.0 / chromium-1208。产物是 editable 安装，`hermes_constants` 解析到**活的 git 检出**（**改代码不需重装**；只有依赖变化才要）。`litellm` 已不再是依赖（`pyproject.toml` grep=0）。
+4. **shim 验活**：`<repo>/.hermes/bin/hermes --version` → `v0.21.5+2533.g7611d47.dirty (2026.9.24)`，rc=0（此前必报 `no dependency environment is committed`）。
+5. **`hermes gateway migrate --multiplex -y`**：写入 `gateway.multiplex_profiles: true`，`gateway_migration.json` 记 `flag_was: false`；网关 153624 → 589971；`served_profiles` 立刻是 7 个。
+6. **删 drop-in** + `daemon-reload` + restart → 网关改用 **PM 运行时**（store Python 3.14.7 + shim），PID 610033，**`NRestarts=0`**（干净启动）。
+7. **`hermes gateway restart`** 归一化 unit → PID 618330，`active/running`。
+
+### 冲突与取舍
+
+- **`.venv` 是错的运行时**（Python **3.11.14**）：缺 `mcp`、缺 `_cffi_backend`、SQLite 3.50.4（WAL 缺陷）。此前那个 drop-in 正指向它，于是 **4 个 MCP server 全部** `AttributeError: module 'tools.mcp_tool' has no attribute 'StdioServerParameters'`（56 条）、插件 `wecom-platform` 加载失败、`Weixin: aiohttp/cryptography not installed` → `No adapter available for weixin`。**这四类问题全部随第 6 步切到 PM 环境后消失** —— 也就是说：不是本次改动引入，而是"跑错解释器"的老问题被这次切换顺带修掉。
+- `hermes pm install` 用 `nohup … &` 启动会被会话回收打断（日志停在 `✓ agent-browser`）；必须 `setsid nohup … < /dev/null &` 才跑得完。
+- 未装 `feishu` extra（PM 环境 `lark_oapi=False`）：按需 lazy-install 由 `security.allow_lazy_installs` 控制（默认开），也可显式 `hermes pm install --extra feishu`。
+
+### 验证结果
+
+- `served_profiles` = `[default, coding, exam, fitness, invest, music, work]`（**7/7**）。
+- 平台状态：`weixin connected`、`api_server connected`、`webhook connected`、`qqbot connected`。
+- 新进程日志：MCP `AttributeError` **0**、`No adapter available for weixin` **0**、`No module named` **0**。
+- MCP 恢复 3/4：cgroup 里 `deerflow`（`venv/bin/python3`）、`word-bridge`、`scrapling`（pipx）都活着。
+- 微信：`[Weixin] session expired …; retrying` + iLink「需用户先给 bot 发消息」—— **与旧进程 12:27 的同一条一致，属平台配对状态，非回归**。
+
+### 遗留（未自动做，附原因）
+
+1. **`hermes gateway list` 会误报 7 个 profile「not running」**：`gateway/status.py:609-613` **有意**把 `python -c <src> … gateway run` 形式判为"非网关进程"（注释引 #107002），而 PM shim 恰好就是这种形式；同时 `~/.hermes/gateway.pid` 也不存在。→ **判活一律用 `systemctl --user show` + `gateway_state.json`，不要用 `gateway list/stop`**；尤其避免 `gateway run --replace`（它不认正在跑的实例 → 可能双实例抢 bot token → flap loop）。
+2. `⚠ Installed gateway service definition is outdated` 是**假警报**：`systemd_unit_is_current()` 的 diff 只有一行 `LD_LIBRARY_PATH`（installed=`/home/morrowind/miniconda3/lib`，expected=**执行 status 的那个 shell** 的 `/usr/lib/wsl/lib`）—— `generate_systemd_unit` 把调用者 shell 的 `LD_LIBRARY_PATH` 烘进 unit。**不要为消警告去 refresh**（那会把 miniconda3 换成 wsl lib）。
+3. `tdx` MCP 起不来：`venv/bin/eltdx-mcp` 不存在（两个 venv 都没有）→ 需用户装回或改 `mcp_servers.tdx.command`。
+4. `gateway_state.json` 里 `feishu: connected` 是**陈旧残留**：全机无 `FEISHU_*` 凭据、日志无 feishu 行、无 lark 进程 → 实际未运行（别被它误导）。
+5. 未做 7 个飞书应用（app 必须由用户在飞书控制台创建）；未装 feishu extra。
+6. `~/Documents/Cline` 断链符号（WSL 路径映射）未修。
+
+### 下次同步注意
+
+- 若新 tag 带来 `pyproject.toml` / `uv.lock` 变化 → 同步后**必须补 `hermes pm install`**（代码由 git 同步，依赖树由 PM 拥有，二者独立）。
+- 改 `.env`/`config.yaml` 前先看 `hermes gateway migrate --multiplex --dry-run`（**只读**、可反复跑），它是唯一权威预检。
+
+---
+
 ## 2026-09-26（第五轮）: 合并残留的 lint error —— 暴露验证链缺口
 
 ### 现象与定位

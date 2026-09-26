@@ -2,7 +2,14 @@
 
 ## R8 · 同步合并 ≠ 安装迁移（2026-09-26 事故）
 
-上游把安装/依赖所有权交给了 `pm/`（统一包管理器）。本 fork 用 `git merge` 同步、**从未跑过 `hermes update`**，所以 `~/.hermes/installs/<key>/` 里**没有提交依赖环境**。
+上游把安装/依赖所有权交给了 `pm/`（统一包管理器）。本 fork 用 `git merge` 同步、**从未跑过 `hermes install` / `hermes update`**。2026-09-26 12:20 实测本机状态（区分两层，别把"目录不存在"当判据）：
+
+| 层 | 状态 | 证据 |
+|---|---|---|
+| 引导层 | **已就位** | `~/.hermes/tools/` 有 `python-3.14.7+20260901-linux-x64`、`uv-0.12.3`、`tirith-0.4.2`；`~/.hermes/installs/<key>/bootstrap/default.json` 记 `bootstrappedAt` / `identity=<HEAD>`；仓库内 shim `<repo>/.hermes/bin/hermes` 存在（`~/.hermes/bin/hermes` 不存在，`expose_cli written: []`） |
+| 依赖层 | ~~未提交~~ → **2026-09-26 12:23 已提交** | 落点是 `installs/<key>/environments/<hash>/venv`（**384 MB / 215 包**），旁边有 `inputs/{pyproject.toml,uv.lock,pm/lock.json}` + `facts.json`；是 editable 安装，`hermes_constants` 解析到**活的 git 检出**（改代码不需重装，只有依赖变化才要）。**判据别搞错**：`pm-runtime/generations/<hash>/` 那个 2.5 MB 的目录是 **PM 自举环境**（`site-packages` 只有 `_virtualenv` `packaging` `ruamel.yaml` `tomli_w` `truststore`），**不是** Hermes 依赖树，它对不对与迁移是否完成无关 |
+
+判据：`du -sh <generation>` + 数 `site-packages` 项数。只有引导包 = 依赖层未提交。
 
 后果：任何**走 PM launcher 的启动路径**（systemd unit → `.hermes/bin/hermes`、`hermes` shim、桌面端）会立刻失败：
 
@@ -21,10 +28,19 @@ hermes: no dependency environment is committed for this install; run `hermes pm 
 
 ## R9 · gateway 服务现状与保护性 drop-in
 
-- 触发点：`hermes gateway restart` 会把 unit 的 ExecStart **重写为 PM shim**（日志里是 `↻ Updated gateway user service definition to match the current Hermes install`）；在无 PM 环境时 → `Restart=always / RestartSec=5` 崩溃循环（实测 5 秒一次，`NRestarts` 冲到 34）。
-- 现有保护（**不要删**，除非满足下条条件）：`~/.config/systemd/user/hermes-gateway.service.d/10-fork-legacy-interpreter.conf`，把 ExecStart / ExecStop / ExecStopPost 覆盖回 `.venv/bin/python …`（后两条用 `-c "sys.path.insert(...); runpy.run_module(...)"` 复刻 shim 行为，不依赖 PM）。
-- **只要该 drop-in 存在，unit 被重写也无害**；代价是 `hermes gateway status` 会一直提示 `⚠ Installed gateway service definition is outdated`（可忽略）。
-- **删除条件**：`hermes pm install` 成功 **且** `~/.hermes/bin/hermes --version` 能跑 → 删 drop-in → `daemon-reload` → `restart`。
+- **现状（2026-09-26 12:33 起，已收口）**：drop-in 已删除（备份在 `/tmp/rb/dropin.conf.disabled`），unit 的 `ExecStart = "<repo>/.hermes/bin/hermes" "gateway" "run"`（PM shim），网关跑在 **PM 运行时**（store Python 3.14.7），`served_profiles` = 7 个。
+- 触发点（历史）：`hermes gateway restart` 会把 unit 的 ExecStart **重写为 PM shim**（日志 `↻ Updated gateway user service definition to match the current Hermes install`）；在无 PM 环境时 → `Restart=always / RestartSec=5` 崩溃循环（实测 5 秒一次，`NRestarts` 冲到 34）。
+- 历史保护（现已废，仅作回滚材料）：`10-fork-legacy-interpreter.conf` 曾把 ExecStart/ExecStop/ExecStopPost 覆盖回 `.venv/bin/python …`。**回滚时不要再用 `.venv`** —— 它是 **Python 3.11.14**：缺 `mcp`（4 个 MCP server 全挂 `tools.mcp_tool has no attribute 'StdioServerParameters'`）、缺 `_cffi_backend`（插件 `wecom-platform` 加载失败）、SQLite 3.50.4 有 WAL 缺陷、`Weixin: aiohttp/cryptography not installed`。要用 `venv`(3.12) 或 PM 环境。
+- **`hermes gateway status` 的 `⚠ Installed gateway service definition is outdated` 是假警报**：`systemd_unit_is_current()` 的 diff 实测只有一行 `LD_LIBRARY_PATH`（installed = 生成 unit 时的 shell 值，expected = **执行 status 的那个 shell** 的值）—— `generate_systemd_unit` 会把调用者 shell 的 `LD_LIBRARY_PATH` 烘进 unit。**不要为消警告去 refresh**（会把 `miniconda3/lib` 换成 `/usr/lib/wsl/lib`）。
+- **判活永远不用 `gateway list` / `gateway stop`**：`gateway/status.py:609-613` **有意**把 `python -c <src> … gateway run` 判为"非网关进程"（#107002），而 PM shim 正是这种形式，且 `~/.hermes/gateway.pid` 不存在 → `gateway list` 会误报全部 profile「not running」。**改用**：
+
+  ```bash
+  systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p MainPID -p NRestarts
+  python3 -c "import json;d=json.load(open('$HOME/.hermes/gateway_state.json'));print(d['pid'],d['gateway_state'],d['served_profiles'])"
+  ```
+
+  同理**不要**用 `gateway run --replace`：它不认正在跑的实例 → 可能双实例抢同一 bot token → flap loop。
+- **删除条件**：`hermes pm install` 成功 **且** **`<repo>/.hermes/bin/hermes --version`** 能跑（注意：unit 指的是**仓库内** shim，不是 `~/.hermes/bin/`；后者不存在）→ 删 drop-in → `daemon-reload` → `restart`。若 shim 仍报 `no dependency environment is committed`，说明依赖层仍未提交，**保留 drop-in**。
 - 重启 gateway 的标准动作与**必做复核**（`hermes gateway restart` 可能报 `⚠ User service did not become active within 155s`）：
 
   ```bash
@@ -47,3 +63,25 @@ hermes: no dependency environment is committed for this install; run `hermes pm 
 - 每轮同步、每次事故/修复，都在 `DEVELOPMENT_LOG.md` **顶部**新增条目（倒序，最新在上），必含：背景（数字）、流程、冲突与取舍、验证结果、**下次同步的注意点**、**待办**。pre-commit 钩子会自动备份到 `~/.hermes/doc-backups/`。
 - 数字要写可复算的原始量（behind/ahead 的节点数、文件数、`+N/−M`、测试通过/跳过数），不要只写结论。
 - 「待办」里未执行的动作要标明**为什么没自动做**（例：微信桥是用户正在用的通道，不自动重启）。
+
+## R12 · 环境变更必须先建回滚包
+
+任何会动**运行中的网关 / systemd unit / 凭据作用域 / PM 依赖树**的操作之前，先建回滚包（保存到 `/tmp/rb/<ts>/`，并把路径写入 `/tmp/rb/LATEST`）：
+
+```bash
+D=/tmp/rb/$(date +%Y%m%d-%H%M%S); mkdir -p $D
+cp -a ~/.hermes/.env $D/env.default; cp -a ~/.hermes/config.yaml $D/config.yaml
+cp -a ~/.hermes/gateway_state.json $D/ 2>/dev/null
+for p in <每个 sub-profile>; do cp -a ~/.hermes/profiles/$p/.env $D/env.$p; cp -a ~/.hermes/profiles/$p/config.yaml $D/config.$p.yaml; done
+cp -a ~/.config/systemd/user/hermes-gateway.service $D/unit.service
+cp -a ~/.config/systemd/user/hermes-gateway.service.d/10-fork-legacy-interpreter.conf $D/dropin.conf
+systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p MainPID -p NRestarts | tee $D/state.txt
+```
+
+回滚三条路径（从轻到重）：
+1. **配置级**：还原 `.env`/`config.yaml` → `hermes config set gateway.multiplex_profiles false` → 重启 gateway。
+2. **启动级**：还原 drop-in → `systemctl --user daemon-reload` → `systemctl --user restart hermes-gateway`。
+3. **兜底**：`systemctl --user stop hermes-gateway`，再手工 `<repo>/.venv/bin/python -m hermes_cli.main gateway run` 保活（它是 venv 解释器，天然绕过 PM 检查），排查后再交还 systemd。
+
+⚠ 每步之后**立刻验活**：`systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p NRestarts -p MainPID` + `journalctl --user -u hermes-gateway --since '3 min ago' --no-pager | tail -40`；`SubState=auto-restart` 或 `NRestarts` 在涨就先 stop。
+⚠ 唯一不可自动回滚的是**成功执行后的 multiplex 折叠**（官方无 rollback 命令）——但它等价于"还原 6 个 profile 的 .env + `multiplex_profiles: false` + 重启"，属路径 1。
