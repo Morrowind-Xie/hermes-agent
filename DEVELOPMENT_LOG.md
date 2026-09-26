@@ -4,6 +4,56 @@
 
 ---
 
+## 2026-09-26（第三轮）: 上游同步至 9fc7f17906（12 → 0）
+
+### 背景
+
+第二轮同步（`e13b5e71ef`）后上游只推了 **12 个提交**（全为非 merge、全在 first-parent 上；**24 files / +311 −36**），tip **`9fc7f17906`** `fix(gateway): steering an addressed message into a running turn keeps the silence fallback`。提交类型 `fix 7 / test 2 / feat 2 / chore 1`，改动集中在 `gateway 8` 文件 + `tests 7`。**仍无稳定 tag**（最新仍是 `rc.14-v0.21.5`，`abandoned-rc.8~13` 并存 → 试发仍在继续）。`pyproject.toml` / `uv.lock` / `package-lock.json` / `apps/desktop/package.json` / `web/` / `scripts/` / `AGENTS.md` / `tests/conftest.py` **全部零改动**。
+
+### 主题（单一，且落在本机正在跑的行为面上）
+
+1. **Gateway「沉默回退」语义五连修**（8/12 条的主干）：`a bare silence marker on a turn not addressed to the bot stays silent`、`a turn that answers an addressed message keeps the silence fallback`、`steering an addressed message into a running turn keeps the silence fallback`（tip）、`fix(slack): thread follow-ups and reaction triggers keep the silence-marker fallback`、`fix(slack): a follow-up in a flat reply_in_thread: false channel keeps the silence fallback`。落点 `gateway/{response_filters,run_busy,run_inbound,run_startup,run_turn,turn_context}.py` + `gateway/platforms/{base,event}.py` + `plugins/platforms/slack/adapter.py`。**本机跑着 gateway + 微信桥，"被点名的消息该不该回 / 沉默标记何时生效"正是它的行为面**（Slack 是例子，`gateway/` 层修复对所有平台生效）。
+   - 顺带查证：**不是**在修我们刚吃进来的回归 —— `response_filters.py` 的 silence 机制已有一长串历史修复（`5f7deeba84` / `293c04fef6` / `30479961b8` / `136f8dab67` / `5ea8fb2b78`），而 `e62a47ab68..e13b5e71ef` 那个窗口只碰过它一次（`0c84aff676`，与 silence 无关）。这是一片长期模糊区在被系统性收紧。
+2. **Claude Opus 5.5 模型目录**（6 条）：`feat(models): add Claude Opus 5.5 to the native Anthropic picker`、`list Claude Opus 5.5 in the Bedrock static fallback`、`fix(models): keep Sonnet 5 as the Bedrock default after adding Opus 5.5`、`fix(bedrock): add Claude Opus 5 to the 1M context table` + 两条 test（静态目录 id 与窗口的守卫、metadata 不匹配记成 mismatch 而非 TypeError）。
+3. **1 条 chore**：映射 4 个贡献者邮箱。
+
+### 流程 / 语义复核（本轮唯一需要动脑处）
+
+预检 → 预演 **0 冲突** → `git merge origin/main` → **实跑零冲突** → 合并提交 **`9ae6a3ec78`**。文本上唯一"两侧都改"的文件是 **`gateway/run_turn.py`** —— 那正是我们 bridge 私有 delta 的落点：
+
+上游改的是 **silence 判定链**（新增 `reply_expected` 参数自 `event.reply_expected` 一路贯穿到 `_finalize_turn_response` 与 `_run_agent_turn`、queued 链新增 `queued_terminal_reply_expected`、判定由 `is_machinery_display_kind()` 换成新的 `silence_allowed(display_kind, reply_expected)`、persist metadata 增 `**reply_expected_metadata(...)`）。
+
+复核结论：**无需改 fork 代码** ——
+- 我们的 bridge inbox 两块（`_hmwa_post_turn_hooks` 定义 @1677、takeover 写入 @~2199、调用点 @2354）都落在上游改动区之外，自动合并位置正确；
+- **作用域完好**：调用点引用的 `message_text` 在 2282 行赋值，早于 2354 的使用（这正是"零文本冲突 ≠ 零复核"要查的点）；
+- 语义正交：我们传的是**判定之后的 `response`**，即 gateway 实际会发出的文本 —— 沉默回退被拒时 `response` 已换成 `_UNEXPECTED_SILENCE_REPLY`，TUI 镜像显示的正是用户会看到的那份，行为正确。
+
+### 验证（全串行）
+
+- 冲突标记 `<<<<<<<` 全树**零**；`py_compile` 7 个关键模块（含本波全部 gateway 文件）OK
+- **私有 delta 逐行存活校验**（范围 `e13b5e71ef..1b5b1fc4d9`）：**missing_total=0**
+- import 冒烟 11/11（覆盖 `gateway.{run_turn,response_filters,run_busy,run_inbound,run_startup,turn_context,platforms.base}`、`plugins.platforms.slack.adapter`、`agent.bedrock_adapter`、`hermes_cli.models_catalog_static`、`cli_bridge_mixin`）
+- MRO 20 项落点不变；`dispatch 44`；`/bridge -> ('_handle_bridge_command', True)`
+- 定向 pytest 12 文件（fork 5 文件集 + 本波 `test_gateway_silence_tokens` / `test_busy_redirect_anchor` / `test_slack_reply_expected` / `test_queued_final_ledger` / `test_active_turn_recovery` / `test_discord_triggering_note_persistence` / `test_bedrock_adapter`）：**248 passed, 13 skipped**
+- `uv lock --check` **rc=0**；desktop `typecheck` **rc=0 / 0 errors**；desktop 定向 vitest **12 文件 / 119 用例全绿 rc=0**；desktop `npm run build` **rc=0**
+- **无需 `npm ci` / `uv sync` / web 重建**（依赖、`web/`、`scripts/` 全零改动）
+
+### 下次同步的注意点
+
+1. **已连续三轮同步落在同一天（1971 → 288 → 12）**，说明上游处在"大波 + 快速补丁波"的节奏里：大波之后紧跟 1–2 个小波把大波的口子补上。**同一天内跟一次小波的成本很低**（本轮零冲突、零依赖、几分钟），值得做。
+2. **稳定 tag 仍未落地**（`rc.9`→`rc.14` 持续重切）。若下一轮出现 `v2026.9.26`，优先钉在 tag 上。
+3. `gateway/run_turn.py` 已成为**两侧的常驻重叠文件**（我们放 bridge inbox，上游放 turn/silence 链）。每轮都要查两件事：**变量作用域**（自动合并可能让调用点引用的名字被搬走，`py_compile` 查不出）与**判定前后语义**（我们该传判定后的值）。
+4. `typecheck` 仍是必需步骤（上游会成批删除"自己树里没人引用"的模块；本波零错误，说明未再发生）。
+5. `platforms()` marker / PM runner / 3.14 结论继续未变（本波 `scripts/`、`AGENTS.md`、`conftest.py` 零改动）。
+
+### 待办（未自动执行）
+
+1. **重启仍在跑旧模块的进程**：gateway `428828`、dashboard `475`（+ `mcp_death_supervisor 855`）、desktop `447717`/`447762`。**未自动重启**（用户正在用的微信桥）—— 本轮尤其值得重启：gateway 的 silence 行为已改。
+2. **建 PM 测试环境**（`setup-hermes.sh` 或首次 `scripts/run_tests.sh`）；定向 pytest 仍走遗留 `venv`，CI 等价性未覆盖。
+3. `git push fork main`。
+
+---
+
 ## 2026-09-26（第二轮）: 上游同步至 e13b5e71ef（288 → 0）
 
 ### 背景
