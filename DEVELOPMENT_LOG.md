@@ -4,6 +4,62 @@
 
 ---
 
+## 2026-09-26（第四轮）: 重启 gateway 暴露「PM 依赖环境未提交」（已用 drop-in 恢复）
+
+### 触发
+
+按第三轮日志的「待办 #1」执行 `hermes gateway restart`（目的：让 gateway 跑上合并后的代码）。
+
+### 现象：服务进入崩溃循环
+
+重启时 CLI 打印 `↻ Updated gateway user service definition to match the current Hermes install`，把 unit 的 ExecStart 从 `…/.venv/bin/python -m hermes_cli.main gateway run` **改写为 PM 启动器**：
+
+```
+ExecStart="/home/morrowind/hermes-agent/.hermes/bin/hermes" "gateway" "run"
+ExecStop/ExecStopPost=… ".hermes/bin/hermes" --run-module gateway.{systemd_stop_mark,cgroup_cleanup}
+```
+
+该 shim 用 **store Python**（`~/.hermes/tools/python-3.14.7+20260901-linux-x64`）启动，而本机**从未提交过依赖环境** → 每次启动立即 `status=1/FAILURE`：
+
+```
+hermes: no dependency environment is committed for this install; run `hermes pm repair`
+```
+
+systemd `Restart=always / RestartSec=5` → **5 秒一次的崩溃循环**（`NRestarts` 一路涨到 34；CLI 侧表现为 `⚠ User service did not become active within 155s`）。微信桥随之中断。
+
+### 立即处置（先恢复服务）
+
+1. `systemctl --user stop hermes-gateway.service` —— 先掐断循环
+2. 新增可逆 drop-in `~/.config/systemd/user/hermes-gateway.service.d/10-fork-legacy-interpreter.conf`，把三条 Exec 覆盖回 venv（`ExecStart=` 空赋值重置后重设；ExecStop/ExecStopPost 用 `-c "sys.path.insert(...); runpy.run_module(...)"` 精确复刻 shim 行为，不依赖 PM）
+3. `systemctl --user daemon-reload` + `start` → **恢复**：`active (running)`，Main PID **153624**，跑的是合并后的代码；`NRestarts` 不再增长
+
+### 根因：`git merge` ≠ 安装迁移
+
+- 本 fork 一直用 `git merge` 同步，**从未跑过 `hermes update`**，所以 PM 的依赖环境（`~/.hermes/installs/<key>/` 下的 venv）从未被提交。`~/.hermes/tools/` 工具库其实已在 09:30 自行建好（python 3.14.7 / uv 0.12.3 / tirith 0.4.2），`installs/7009bded74a48963/` 只有 `bootstrap/default.json` 与 `pm-runtime/`，**没有 venv**。
+- 关键代码事实（`pm/environments.py::_require_own_dependencies`）：
+  - `sys.prefix != sys.base_prefix`（**venv 解释器**）→ 直接放行（"a venv interpreter carries its own packages"）
+  - 跑在 **store Python** 且无已提交环境 → **raise RuntimeError("no dependency environment is committed for this install")**
+  这解释了为什么 `.venv/bin/python -m hermes_cli.main …` 一直好用，而 PM shim 一用就死。
+
+### 潜伏陷阱与缓解
+
+**任何后续 `hermes gateway restart` / `hermes gateway install` 都会再把 unit 写回 PM shim**，又会崩溃循环。drop-in 覆盖 ExecStart，**只要它在就安全**；代价是 `hermes gateway status` 会持续提示 `⚠ Installed gateway service definition is outdated`。
+
+根治路径（需专门窗口）：`hermes pm install`（建 3.14 依赖环境）→ 用 `.hermes/bin/hermes --version` 验证 shim → 删 drop-in → 重启。注意它会改变启动所有权（desktop / dashboard 目前也走 venv）。
+
+### 顺带观察（均为既存，非本次引入）
+
+- 微信 `[Weixin] session not ready: ret=-2 … the user must send the bot a message first (or re-pair)`：**重启前的旧进程日志（09:32）里同样存在**，需要用户先给 bot 发一条消息重配对。
+- venv 里的 SQLite **3.50.4** 有 WAL-reset 损坏漏洞告警（`hermes_state`，每库每进程一次）；PM 的 3.14 运行时应可消除 —— 又多一条迁移理由。
+- **7 个 profile 共用同一个 `WEIXIN_TOKEN`**（default vs coding/exam/fitness/invest/music/work）→ gateway 保持 standalone，其余 profile 的 weixin adapter 被 park。属配置层既存问题。
+- `.restart_pending.json` 里还有一条 09-24 遗留的 qqbot 待送达记录；启动时有一条 pending 消息恢复失败（`FOREIGN KEY constraint failed`）。
+
+### 教训（写进同步流程）
+
+**同步合并 ≠ 安装迁移。** 当上游把安装/依赖所有权交给 PM 之后，`git merge` 之后必须补一步 **PM 环境提交（`hermes pm install`）**，否则所有走 PM launcher 的启动路径（systemd unit、`hermes` shim、桌面端）都会失败。以前"merge 完就没事"的假设不再成立。
+
+---
+
 ## 2026-09-26（第三轮）: 上游同步至 9fc7f17906（12 → 0）
 
 ### 背景
