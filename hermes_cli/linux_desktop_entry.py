@@ -197,6 +197,18 @@ def _resolve_hermes_bin_for_desktop_entry(
     module_lexical_root = _project_root()
     original_argv0 = sys.argv[0]
 
+    # A PM-managed source checkout carries an installer-written launcher at
+    # <checkout>/.hermes/bin/hermes. It targets THIS checkout (absolute repo path)
+    # and selects the committed dependency environment, so its interpreter matches
+    # the environment hermes_bootstrap injects — a stale repo venv would die on the
+    # first binary extension (pydantic_core, mcp, _cffi_backend). Prefer it over an
+    # external primary: the PM environment's own console script resolves its
+    # project root to the PM workspace snapshot, which carries no apps/desktop, so
+    # a DE launch of that entry finds nothing to start.
+    pm_launcher = Path(checkout_root) / ".hermes" / "bin" / "hermes"
+    if pm_launcher.is_file() and os.access(pm_launcher, os.X_OK):
+        return str(pm_launcher)
+
     # An external primary (another install's /opt/.../bin/hermes, a venv console script) wins
     # BEFORE any known-location probing, which could silently switch the entry to a different
     # installation. Only rerun the resolver with argv[0] hidden when the primary could actually

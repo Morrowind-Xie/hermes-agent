@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-09-26（第十轮）: 收尾两处 —— 应用菜单启动项 + webui 服务的"重启炸弹"
+
+### 处置与验证
+
+| 对象 | 改前 | 改后 | 验证 |
+|---|---|---|---|
+| `~/.local/share/applications/hermes.desktop` | `Exec=<PM环境>/venv/bin/hermes desktop` | `Exec=/home/morrowind/hermes-agent/.hermes/bin/hermes desktop` | 重新生成后文件内容确认 |
+| `hermes-webui.service` | `ExecStart=<repo>/venv/bin/python -m hermes_cli.main dashboard --port 9119 --no-open`（**3.12**） | `ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open`（**PM shim / 3.14**） | `active/running`、`NRestarts=0`、解释器 = store Python 3.14.7、`/api/health` 从 **0.21.3 升到 0.21.5**、启动日志 0 报错 |
+
+- **菜单项根因**：上游 `_resolve_hermes_bin_for_desktop_entry` 故意让"外部 primary"（PM 环境的 console script）优先。但那个 console script 把项目根解析成 **PM 的 workspace 副本**（`installs/<key>/environments/<hash>/workspace`，那里没有 `apps/desktop`）→ DE 启动时报 `Desktop GUI source not found`。修法：在该函数入口加"若 `<checkout>/.hermes/bin/hermes` 存在则优先返回"（它由安装器写入、指向**本 checkout**、且解释器与被注入的环境匹配）。该函数的唯一调用方是菜单项生成（`resolve_exec_command`），改动面很窄。
+- **webui 修复的附带收益**：9119 上的 dashboard 从 9-24 的旧代码（0.21.3）变成今天的代码（0.21.5）。
+- **`dashboard.service`（端口 8888）未动**：它是用户自己的原型（`My_Projects/dashboard/app.py`），只是借用 `<repo>/venv/bin/python3` 当解释器，不 import `hermes_cli.main` → 不受 3.14 注入影响。乱动它没有收益。
+- **回滚包**：`/tmp/rb/desktop-menu-20260926-161654/`（三个 unit + `hermes.desktop` + webui 状态快照）。
+
+### 本轮的两处代码补丁
+
+1. `hermes_cli/main_desktop.py::_desktop_launch_env()`：当 `<repo>/.hermes/bin/hermes` 存在时 `env.setdefault("HERMES_DESKTOP_HERMES", …)` → 覆盖菜单/终端/所有启动路径；显式覆盖仍优先；非 PM 安装行为不变。
+2. `hermes_cli/linux_desktop_entry.py::_resolve_hermes_bin_for_desktop_entry()`：优先进程内上述 shim，避免菜单项指向 PM workspace。
+
+### 待办（如实记录）
+
+1. **PM 测试环境仍未建**（`installs/<key>/test-environment` 不存在，PM 环境里也没有 pytest）→ 本波两处补丁**只做了功能级验证**（单元级调用 + 端到端启动 + 健康检查），**没有跑 `tests/hermes_cli/test_linux_desktop_entry.py` 等定向测试**。这是 CI 等价性缺口，已知偏差。
+2. 桌面端当前实例由 shim 启动（后端 PID 1387377 / 端口 45933 / `/api/health` 0.21.5+2537）；用户如需从菜单重开，首次可能触发一次构建（菜单项不带 `--skip-build`）。
+3. 键盘上的"菜单项首启会不会重新触发上游安装向导"未再复测（已确认 Exec 指向本 checkout，`isHermesSourceRoot` 通过；且 `ACTIVE_HERMES_ROOT` 仍不存在，但由于 `HERMES_DESKTOP_HERMES` 在 path 3 先命中，不再进入 bootstrap 分支）。
+
+---
+
 ## 2026-09-26（第九轮）: 桌面端"Connect to existing Hermes"的真相 —— PM 注入 3.14 site-packages 造成解释器 ABI 不匹配
 
 ### 现象

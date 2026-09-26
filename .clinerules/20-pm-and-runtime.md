@@ -85,3 +85,22 @@ systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p MainP
 
 ⚠ 每步之后**立刻验活**：`systemctl --user show hermes-gateway.service -p ActiveState -p SubState -p NRestarts -p MainPID` + `journalctl --user -u hermes-gateway --since '3 min ago' --no-pager | tail -40`；`SubState=auto-restart` 或 `NRestarts` 在涨就先 stop。
 ⚠ 唯一不可自动回滚的是**成功执行后的 multiplex 折叠**（官方无 rollback 命令）——但它等价于"还原 6 个 profile 的 .env + `multiplex_profiles: false` + 重启"，属路径 1。
+
+## R13 · 本机一切 Hermes 入口必须走 PM shim（3.14）
+
+**根因**：`hermes_bootstrap` 在进程启动时把**已提交的 PM 环境**（`installs/<key>/environments/<hash>/venv/lib/python3.14/site-packages`）注入 `sys.path`。于是**任何非 3.14 解释器跑 `hermes_cli.main`，一碰二进制扩展就崩**：`No module named 'pydantic_core._pydantic_core'`（fastapi/pydantic）、缺 `mcp`、缺 `_cffi_backend`。仓库里遗留的 `venv`(3.12) / `.venv`(3.11) 都在此列。
+
+**规则**：凡是启动 Hermes 的表面（systemd unit、桌面端后端、菜单项），一律用 **`<repo>/.hermes/bin/hermes`**：
+
+```bash
+# 桌面端（`main_desktop.py` 已自动设置 HERMES_DESKTOP_HERMES 为 shim；显式覆盖仍优先）
+<repo>/.hermes/bin/hermes desktop --skip-build
+# 任何 unit 的 ExecStart
+ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open
+```
+
+**已收口的四处（2026-09-26）**：`hermes-gateway.service`、`hermes-webui.service`、桌面端后端（两处代码补丁：`main_desktop.py` 默认 `HERMES_DESKTOP_HERMES`、`linux_desktop_entry.py` 优先进程内 shim）、应用菜单项 `hermes.desktop`。
+
+**排查口诀**：看到 `pydantic_core._pydantic_core` / `mcp` / `_cffi_backend` 缺失的报错，**先查启动命令的解释器版本**，不要去 pip 装包。
+
+**不要点桌面端的 "Install Hermes locally"**：它跑官方 `install.sh` 分阶段流程，会克隆**上游**仓库到 `~/.hermes/hermes-agent`（不是本 fork），留成半成品后会让桌面端一直卡在首次运行界面（2026-09-26 已发生一次，清除见第九轮日志）。
