@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-09-26（第十二轮）: 7 个飞书机器人全部接通（default + 6 个 profile 各自独立 bot）
+
+### 已完成
+
+- 5 套凭据写入各自 `profiles/<p>/.env`（600）：invest / music / coding / exam / fitness（work、default 前几轮已接）。每份都含 `FEISHU_DOMAIN=feishu`、`FEISHU_CONNECTION_MODE=websocket`、`FEISHU_ALLOW_ALL_USERS=true`、`FEISHU_GROUP_POLICY=open`。
+- **写入前先逐把验钥匙**（省一次白重启）：5 把全部 `code=0 ok`，机器人名依次 **Invest / Music / Coding / Exam / Fitness**（default = Hermes，work = Work）。
+- 预检 `hermes gateway migrate --multiplex --dry-run`：7 个不同 app_id **互不冲突**，无 blocker。
+- **一次重启**全部生效。回滚包：`/tmp/rb/feishu-multi-20260926-200316/`（7 个 `.env` + 状态快照）。
+
+### 验证结果（两个独立来源）
+
+1. `gateway_state.json`：**7 个飞书条目**全部 `connected`，且 `writer_pid` = 当前进程 → 是真连接，不是残留：
+
+   ```
+   feishu(default) · coding:feishu · exam:feishu · fitness:feishu · invest:feishu · music:feishu · work:feishu
+   served_profiles = 7
+   ```
+
+2. 各 profile 自己的日志 `profiles/<p>/logs/gateway.log` 均有 `[Feishu] Connected in websocket mode (feishu)`（6/6）。
+
+网关：PID 2413844、`active/running`、`NRestarts=0`；新进程 ERROR 共 1 条（微信 iLink 配对提示），**飞书相关 0**。
+
+### 最终名录
+
+| profile | 飞书机器人名 | App ID |
+|---|---|---|
+| default | Hermes | `cli_a91daec09fb8dbd1` |
+| work | Work | `cli_a91d4c3cd2789bb3` |
+| invest | Invest | `cli_aa3ddd3580b8dcbb` |
+| music | Music | `cli_aa3ddf3319b85cbd` |
+| coding | Coding | `cli_aa3dc5ef71381cb4` |
+| exam | Exam | `cli_aa3dc68e22b8dcb8` |
+| fitness | Fitness | `cli_aa3dc6c347b8dcc9` |
+
+### 遗留
+
+1. 7 个 app 的 `im:chat` / `im:chat:readonly` 都未开通 → 每收一条消息一条 WARNING（不影响聊天）。补权限 + 重新发布版本即可消除。
+2. `tdx` MCP 仍缺可执行文件（`venv/bin/eltdx-mcp`），用户侧待处理。
+3. **用户需在飞书里分别私聊 7 个机器人**做端到端确认（每个 bot 在飞书里是独立联系人）。
+
+---
+
 ## 2026-09-26（第十一轮）: 补上 CI 等价性缺口 —— PM 测试环境已建，定向测试全绿
 
 ### 背景
