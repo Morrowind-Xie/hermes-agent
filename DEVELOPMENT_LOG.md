@@ -4,6 +4,57 @@
 
 ---
 
+## 2026-09-26（第九轮）: 桌面端"Connect to existing Hermes"的真相 —— PM 注入 3.14 site-packages 造成解释器 ABI 不匹配
+
+### 现象
+
+新版桌面端弹出首次运行界面，要求填 **Gateway URL**（"Connect to existing Hermes"）。用户问：右边那个选项是"重装一遍 Hermes"还是"只配置 desktop"？
+
+### 原因链（逐步实证）
+
+1. **桌面端的"本地安装"标准位置是 `~/.hermes/hermes-agent`**（`main.ts:966 ACTIVE_HERMES_ROOT = HERMES_HOME/hermes-agent`；`active-runtime-state.ts` 注释："运行时可用性是权威，缺失标记不该把一个健康的本地安装推进首次运行界面"）。该目录当时**不存在**（用户的 checkout 在 `~/hermes-agent`）→ 判为"无可用的本地运行时" → 弹首次运行界面。
+2. **用户点了右边 = "Install Hermes locally" = 完整安装**（i18n：`installLocalDesc: 'Download Hermes, create its Python environment, and run the backend on this computer'`；由 `apps/bootstrap-installer`（Tauri）分阶段驱动官方 `install.sh`）。它**克隆了一份上游 NousResearch 仓库**到 `~/.hermes/hermes-agent`（444 MB，HEAD `d0288be5b3`，origin=NousResearch），随后中止（desktop.log：`Details: cancelled by user` → `Setting up Hermes stopped during the 'Hermes source code' step`），**留下半成品**：无 `.env`、无 `venv`、无 `node_modules`、无 `.hermes-bootstrap-complete`。**它不是 fork**，让它装完会出现"桌面端跑上游、网关跑 fork"的双轨。
+3. 我先用 `HERMES_DESKTOP_HERMES_ROOT=<repo>` 启动 → 桌面端走解析顺序 path 1（`createSourcePythonBackend(findPythonForRoot(root))`，`source-backend.ts:102` 设 `PYTHONPATH=root`、`args=['-m','hermes_cli.main',...]`）→ 用仓库里的**旧 venv**（`.venv`=3.11 / `venv`=3.12）跑后端 → 崩：
+   ```
+   The dashboard can't start: its web-server packages (fastapi, uvicorn) are missing from this install.
+   Details: No module named 'pydantic_core._pydantic_core'
+   ```
+4. **根因（实测复现，两个解释器都复现）**：`import hermes_bootstrap` 会把**已提交的 PM 环境**注入 `sys.path`：
+   ```
+   3.12 解释器 → sys.path 多出
+   .../installs/<key>/environments/<hash>/venv/lib/python3.14/site-packages
+   而该目录的 pydantic_core 只有 _pydantic_core.cpython-314-...so
+   ```
+   → **任何非 3.14 解释器跑 Hermes CLI，一碰到带二进制扩展的包就崩**（fastapi→pydantic_core、mcp、_cffi_backend 都是这个死法）。同一根因解释了本日更早发现的 `.venv` 跑网关缺 `mcp` / 缺 `_cffi_backend`。
+5. **修复**：桌面端解析顺序 **path 3 `HERMES_DESKTOP_HERMES`**（"explicit deployment override … resolve it before any mutable install"）指向 **`<repo>/.hermes/bin/hermes`（PM shim，store Python 3.14）** —— 与被注入的 site-packages 版本匹配。**注意 path 1 优先级高于 path 3，所以必须不设 `HERMES_DESKTOP_HERMES_ROOT`。**
+
+### 处置
+
+- 关闭桌面端（Electron 树）→ **删除** `~/.hermes/hermes-agent`（444 MB 上游半成品；删除前核查：无 `.env`/`venv`/`node_modules`/完成标记、0 未提交改动、顶层仅 `.git`）。
+- 用正确方式启动：
+
+  ```bash
+  HERMES_DESKTOP_HERMES=/home/morrowind/hermes-agent/.hermes/bin/hermes \
+    /home/morrowind/hermes-agent/.hermes/bin/hermes desktop --skip-build
+  ```
+  （`--skip-build` 直接使用 `apps/desktop/release/linux-unpacked/Hermes`，不重新构建）
+
+### 验证结果
+
+- 桌面端后端 = **store Python 3.14.7 + shim**：`--profile invest serve --host 127.0.0.1 --port 0`（PID 1331187），监听 **127.0.0.1:46535**（**动态端口**，所以那个"Gateway URL"输入框本来就用不上）。
+- `GET /api/health` → `{"ok":true,"version":"0.21.5","displayVersion":"0.21.5+2536","auth_required":false}`（**fork 当前版本**，对比旧 dashboard 的 0.21.3）；`/api/status` → `config_version: 46`。
+- `desktop3.log` 中 `can't start` / `ModuleNotFound` / `Error occurred` 计数 **0**。
+- 系统网关未受影响：`active/running`、`served_profiles` 7 个、`feishu connected`。
+
+### 遗留（重要，未自动做）
+
+1. ⚠ **`hermes-webui.service`（dashboard，127.0.0.1:9119）下次重启会崩**：它的 ExecStart 是 `venv/bin/python -m hermes_cli.main dashboard --port 9119`（**3.12**），现在 PM 3.14 环境已被提交 → 重启即触发同一个 `pydantic_core._pydantic_core` 崩溃（本日已实测两个旧 venv 都复现）。当前它还活着只是因为进程启动于 12:23 之前。**修法**：把 unit 的 ExecStart 改成 `<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open`（PM shim）。未自动改：它是用户长期在用的 dashboard 服务，改完需重启它。
+2. 可考虑在 fork 的 `hermes_cli/main_desktop.py` 里**自动设置 `HERMES_DESKTOP_HERMES` 为 PM shim**（PM 安装下只有 shim 的解释器匹配）；未做，需按上游规范评估后单独提交。
+3. 桌面端的 "Install Hermes locally" **不要再点完**（会装一份上游 Hermes 到 `~/.hermes/hermes-agent`）。
+4. `/tmp/rb/desktop3.log`、回滚包 `/tmp/rb/feishu-work-20260926-140621/` 等仍在。
+
+---
+
 ## 2026-09-26（第八轮）: work 飞书机器人接通 —— 双 profile 各自独立 bot
 
 ### 已完成
