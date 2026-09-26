@@ -6,8 +6,8 @@ import {
   BackgroundSlotRetryBackoff,
   decideLocalBackendAdmission,
   isLocalBackendPoolSaturatedError,
-  LocalBackendSlotWaitTimeoutError,
   localBackendPoolSaturatedMessage,
+  LocalBackendSlotWaitTimeoutError,
   LocalBackendSpawnCoordinator,
   releaseLocalBackendSlotAfterExit
 } from './pool-spawn-coordinator'
