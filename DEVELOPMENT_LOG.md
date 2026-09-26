@@ -4,6 +4,72 @@
 
 ---
 
+## 2026-09-26: 上游同步至 e62a47ab68（1971 → 0）
+
+### 背景
+
+`main` 落后 `origin/main` **1971 个提交图节点**（分叉点 `9a6108fdf2`，即 09-24 同步的上游 tip）、领先 76。这 1971 = **1737 个内容提交 + 234 个合并接点**（父数分布实测 `1737×1父 / 234×2父`，无 0 父与 octopus，故两者穷尽）。**234 个 merge 里有 166 个是"往长期分支 `ethie/pm-clean` 里合 main"**（另有 13 个往 `feat/local-models`）—— 不是 234 个 PR（唯一 PR 号只有 23 个），只是分支同步的账目节点。主线口径（first-parent）只有 **370 个节点**（346 直接提交 + 24 个 PR merge），其余 1601 个节点从侧分支带入。上游 tip `e62a47ab68`（curator 两条修复），**无新 tag**（新 tag 仅 `v0.21.4+canary.20260925T065930Z`、`rc.7/rc.8-v0.21.5` 及两个 `abandoned-rc.*`）。规模 **3838 files / +223654 −97598**（上次 6154 files，约 62% 体量）。
+
+### 流程
+
+工作区干净、`main == fork/main` → 记录在跑的 gateway/dashboard/desktop PID（475 / 428828 / 447717）→ `git merge-tree --write-tree` 预演（**4 个冲突，与实跑逐字一致**）→ `git merge origin/main` → 解冲突 → 合并提交 **`e3555bb46a`** → 验证链 → 跟进修复 **`c1b8b51e57`**。收尾：落后 **0**、领先 **78**。
+
+### 冲突与取舍（4 文件）
+
+| 文件 | 冲突 | 取舍 |
+|---|---|---|
+| `.gitignore` | 本地加 `.codebuddy/ .qoder/ .tmp/`；上游加 `hermes_cli/_version.py`、`apps/desktop/electron/**/*.js*`、`install-stamp.json`、`.build/ .cache/`、`/pm/.lock.json.lock`、`apps/desktop/.dist-build*` | **并集** |
+| `apps/desktop/electron/bootstrap-platform.ts` | 本地加 IME 可达性块（~190 行）+ `describeLinuxInputMethod` 导出 + `import { linuxOzoneBackend }`；上游**删除 `bundledRuntimeImportCheck` 函数**并把导出收成一行 | 保留本地块与 `describeLinuxInputMethod`，**去掉 `bundledRuntimeImportCheck`**（函数已不存在，否则 TS 报错），采用上游单行导出 |
+| `hermes_cli/main_desktop.py` | 本地给 source 启动加 `*config_electron_flags`（7 行）；上游把 source 启动**换成"prepared Electron 运行时"**（读 `_electron_dir()/path.txt`，不再 `npm exec`），该函数 192+/413− | **取上游新结构**，把本地意图（`desktop.electron_flags` 必须同样抵达 source 启动）重新落到 `launch_command = [str(executable), ".", *config_electron_flags]` |
+| `package.json` | 本地 `postinstall` 尾部追加 `node scripts/patch-assistant-ui-render-loop.mjs`；上游把 `postinstall` 的 `\u2705` 改成字面 ✅、新增 `dependencies`（`js-yaml`/`semver`）与 `overrides` | 取上游的 ✅ 字面量 + **保留本地补丁追加** |
+
+### 移植（语义冲突：本地 2 个测试写死了旧启动形态）
+
+上游换掉 source 启动实现后，本地 `test_gui_source_launch_applies_configured_electron_flags` / `..._stays_clean_without_configured_flags` 断言的 `["/usr/bin/npm","exec","--","electron","."]` 已不存在。新增助手 `_prepare_source_launch_tree()`（铺 `dist/index.html` + `node_modules/electron/{dist/electron,path.txt}`，UTF-8-SIG）并以 `_ns(source=True, skip_build=True)` 走真实路径，断言改为**精确**等值 `[str(exe), ".", *flags]`（比原来"包含"更严）。两个测试的意图（flags 必须抵达 source 启动、无配置时不产生空参数漂移）保持不变。
+
+### 合并后修复
+
+**`c1b8b51e57`**：上游 `7f6ec2749e chore(desktop): drop four electron modules nothing imports` 一次删掉 4 个模块（`deep-link-route` / `gitlock` / `pool-eviction` / `update-remote`）。前三个本树确实无人引用，但 **`pool-eviction.ts` 被本 fork 的 `main.ts` 引用**（`selectPoolEvictions()` → `localBackendSlotsThatMayFree()` → `decideLocalBackendAdmission`，即本地私有"池饱和 backpressure"链路）；上游删它的前提是"**上游树**里无人引用"。首次 typecheck 因此 **1× TS2307**。处置：按分叉点**恢复 `pool-eviction.ts` + `pool-eviction.test.ts` 为 fork 本地文件**（模块自带 `PoolEvictionEntry`/`selectPoolEvictions`/`evictPoolEntries`，零 import，自洽）。这与 09-15 那次 `e6656a3b24 fix(desktop): re-import selectPoolEvictions dropped by the upstream merge` 是同一处代码的第二次被撞。
+
+### 验证（全串行，零假阳性）
+
+- 冲突标记 `<<<<<<<` 全树**零**（`git grep -c '^<<<<<<< '` 空）；`py_compile hermes_cli/main_desktop.py` OK
+- import 冒烟 11/11：`main_desktop` / `cli_{init,tui_runtime,bridge,chat_turn,stream}_mixin` / `commands` / `agent.auxiliary_client` / `pm.{cli,testenv,build_env}`
+- MRO 探针（20 项）：`_init_runtime_state → CLIInitMixin`、`_tui_print_startup`/`_tui_process_loop → CLITuiRuntimeMixin`、`_handle_bridge_command`/`_bridge_start_inbox_watcher → CLIBridgeMixin`；`HermesCLI._slash_handler('bridge') == ('_handle_bridge_command', True)`，分发表 44 条
+- 定向 pytest 5 文件（`gateway/test_weixin` / `test_weixin_secret_scope` / `hermes_cli/test_gui_command` / `test_config_read_guard` / `test_interrupt_requeue_image_payload`）：**89 passed, 10 skipped**
+- **私有 delta 逐行存活校验**（自写 `verify_private.py`：取本地相对分叉点的 `+` 行，逐行核对是否仍在合并后文件中）：30 文件 **missing_total=0**（12 处"缺失"逐条确认为上面的刻意重写）
+- `uv lock --check` **rc=0**（uv 自动下载 **CPython 3.14.6**，按 3.14 解析 331 包）
+- 根 `npm ci`（`npm_config_engine_strict=false`）**rc=0**；`scripts/patch-assistant-ui-render-loop.mjs` 补丁在 postinstall 后**已重新落盘**（`grep -c hermes-render-loop-patch` = 1）
+- desktop `npm run typecheck`（renderer + electron + e2e + `electron-builder.config.cjs` 四套）**rc=0 / 0 errors**（恢复 `pool-eviction` 后）
+- desktop 定向 vitest **12 文件 / 119 用例全绿 rc=0**（`bootstrap-platform`、`pool-eviction`、`pool-limits`、`pool-spawn-coordinator`、`pool-stop`、`pool-reclamation`、`titlebar-overlay-width`、`window-controls`、`gateway-pool-saturation`、`gateway`、`gateway-spawn-priority`、`gateway-reconnect`）——与 09-24 基线数字一致
+- `npm run build --workspace web` **rc=0** → `hermes_cli/web_dist` 重建；desktop `npm run build` **rc=0**（`assert-dist-built` 通过）
+
+### 本次上游的重点（结构性，不只是代码）
+
+1. **`pm/` 统一包管理器成为新地基（167 提交，scope 榜第一）**：新顶层包 `pm/`（54 文件，**自带 `pm/pyproject.toml` + `uv.lock` + `lock.json`**），`hermes pm lock/install/repair`、**PM generation**（换代后进程需重启）、runtime extras 隔离；AGENTS.md 新规"**Do not mutate Hermes environments with raw pip or uv**"；新根入口 `activate` / `activate.ps1` / `setup-hermes.sh`。
+2. **Python 运行时抬到 3.14**：`.python-version 3.11 → 3.14`、`requires-python <3.14 → <3.15`、`[tool.uv] environments = ["python_version >= '3.14'"]`（注释明说 3.11 只是 pre-PM updater 的过渡桥）。新增 `tests/compat/`（pre-PM updater 兼容面冻结 + `scripts/audit-old-updater-imports.py`）。
+3. **测试基建换代**：`scripts/run_tests.sh` 重写 —— **不再探测 `.venv`/`venv`**，改为激活 checkout 的**隔离测试环境**（`pm.testenv` + `scripts/_activation.sh`），输入（`uv.lock`/`pyproject.toml`/`pm/lock.json`）mtime 变化时自动重激活；`linux_only`/`macos_only`/`windows_only` 被**单一 `@pytest.mark.platforms(...)`** 取代（specs: `linux/macos/windows/posix/any/not X`，支持 `arch=`，conftest 拒绝同测试挂两个 `platforms`）。
+4. **版本身份重做**：主线 `pyproject.toml` / `apps/desktop/package.json` 版本恒为 **`0.0.0`**，真实身份 = release tag + **`install-stamp.json`**，`hermes_cli/_version.py` 改为构建期生成（已 gitignore）→ **"看版本号判断要不要 `npm ci`"这条经验作废**。
+5. desktop 打包改道 **MSIX**（`dist:win → msix`，nsis 退场）、`electron-updater@6.8.9`、bundled payload 变体；另见新发布体系 `stable-release.yml` / `desktop-bundled-release.yml`（+2532）。
+6. 其他：`local-runtime`/`local-models`（托管 llama.cpp、模型 catalog、context policy）、termux 支持、`feat(web): serve managed search through Perplexity`、编码硬化（`utf-8-sig` 批量修复，含 cron/文本读取）、平台插件修复（feishu / dingtalk 日志风暴+熔断 / kimi brotli）。**skills 新增 0 个。**
+
+### 下次同步的注意点
+
+1. **PM 拥有 Python 依赖**：改 `pyproject.toml` 后跑 `hermes pm lock` 并重 `source ./activate`；别再手工 `uv lock`/`pip install`。开发环境激活改为 `source ./activate`（bash/zsh）或 `. .\activate.ps1`（PowerShell），`deactivate` 精确还原。
+2. **`scripts/run_tests.sh` 需要 PM bootstrap**：本机 `~/.hermes/installs/` **尚不存在**（PM 测试环境未建），首次运行会下载 **CPython 3.14.6** 并建 `test-environment`（默认 extras=`all` + `dev`/`test` groups）。本次定向验证因此**走的仍是遗留 `venv`**（`./venv/bin/python -m pytest`）—— CI 等价性未覆盖，属于已知偏差。
+3. **上游会成批删除"自己树里没人引用"的 electron 模块**（本次 `7f6ec2749e` 一次删 4 个）。**fork 本地伴随文件每轮同步都要复查**：`hermes_cli/cli_bridge_mixin.py`、`apps/desktop/electron/pool-eviction.ts(+test)`、`scripts/patch-assistant-ui-render-loop.mjs`。这类丢失**只有 typecheck/import 能发现**（源码检查无感），所以 **typecheck 是必需步骤**，不能跳。
+4. 判"要不要 `npm ci` / 要不要重建"只能看 `git diff --stat` + lockfile 实际差异，**版本号不再是探针**（见上 0.0.0）。
+5. 验证节奏照旧**全串行**：pytest → `uv lock --check` → `npm ci` → tsc → vitest → web build → desktop build（本次零假阳性）。
+6. 新平台 marker：本地新增测试若用 `linux_only` 等旧名，会被 `list_os_marked_tests.py` 解析不到而**静默不被任何车道 import**。
+
+### 待办（未自动执行）
+
+1. **重启正在跑旧模块的进程**：gateway `428828`（`.venv`）、dashboard `475`（+ `mcp_death_supervisor 855`）、desktop `447717`/`447762`（0.17.6 旧包）。**未自动重启**：那是用户正在用的微信桥（沿用 09-24 的处置）。
+2. **建 PM 测试环境**（`setup-hermes.sh` 或首次 `scripts/run_tests.sh`），此后测试走 3.14 隔离环境。
+3. `git push fork main`（区间 `e3555bb46a..c1b8b51e57`）。
+
+---
+
 ## 2026-09-24: 上游同步至 9a6108fdf2（3194 → 0）
 
 ### 背景
