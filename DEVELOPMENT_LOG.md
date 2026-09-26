@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-09-26（第十三轮）: 接入钉钉 + 找到 WS 握手超时的元凶（IPv6）
+
+### 已完成
+
+- 装 SDK：`hermes pm install --extra dingtalk` → `dingtalk-stream 0.24.3` + `alibabacloud-dingtalk 2.2.42`（新建 generation `70394f412227459bb96f89515118523c`）
+- 凭据写入 default `.env`（600）：`DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET` / `DINGTALK_ALLOW_ALL_USERS=true`；**写前先验**：`/v1.0/oauth2/accessToken` 换 token 成功 ✓
+- 预检无阻断；状态文件出现 **`dingtalk connected`**（空 AgentId 未使用：插件默认 `robot_code = client_id`）
+- 回滚包：`/tmp/rb/dingtalk-creds-212836/`、`/tmp/rb/dingtalk-20260926-212602/`
+
+### 关键诊断：`timed out during opening handshake`
+
+启动后 `dingtalk_stream.client` 反复报 `unknown exception timed out during opening handshake`（累计 5 次）。逐层排除：
+
+| 检查 | 结果 |
+|---|---|
+| `api.dingtalk.com` 解析 | **IPv6**（`2401:b180:2000:50::b`） |
+| `wss-open-connection.dingtalk.com` 解析 | IPv4（`39.99.237.196`），直连 **0.77s** ✓ |
+| `api.dingtalk.com` 直连 | **5.7s**（IPv6 回退/慢路径的特征） |
+| shell 代理 | 有 `https_proxy=http://127.0.0.1:7897`（返回 404 属正常，TLS 通） |
+| systemd unit | **无代理变量** → 网关是**直连** |
+| WS 直连握手 | `HTTP 400 InvalidStatus`（缺参数的正常响应）= 网络可达 |
+| A/B：PM 环境直连跑 `DingTalkStreamClient.start()` | **>45s 卡死**（无代理时） |
+
+**修复**：`hermes config set network.force_ipv4 true`（monkey-patch socket；`gateway/run.py:2102` 应用）→ 重启后**握手超时次数 = 0**，钉钉零报错。
+
+**规则**（已可复用）：遇到**国内服务的 WS/HTTP 建连随机超时**，先查 `network.force_ipv4`（本机 `api.dingtalk.com` 有 IPv6 记录而 IPv6 路径慢/不通）。这是**配置级**修复，不影响其它平台。
+
+### 待验证 / 遗留
+
+1. **用户需在钉钉里搜索该机器人并发消息**（机器人要先被"打开会话"）→ 我查 `gateway.run: inbound message: platform=dingtalk` 确认端到端。
+2. 钉钉**回复依赖会话 webhook**（`Reply must follow an incoming message`）→ 主动推送需另配 `DINGTALK_WEBHOOK_URL`；`DINGTALK_ALLOW_ALL_USERS=true` 暂时放开，拿到 sender id 后应收紧为白名单。
+3. 只接了 **default**；其它 6 个 profile 各需独立钉钉应用（1 应用 = 1 机器人），建议 default 验证通过后再扩。
+4. 飞书 6 个 bot 的"连上但收不到"仍未定性（已按用户要求暂停，配置原样保留）。
+
+---
+
 ## 2026-09-26（第十二轮）: 7 个飞书机器人全部接通（default + 6 个 profile 各自独立 bot）
 
 ### 已完成
