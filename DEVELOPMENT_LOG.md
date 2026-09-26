@@ -4,6 +4,43 @@
 
 ---
 
+## 2026-09-26（第十四轮）: 第二个钉钉机器人（work）接通 —— 多机器人共存验证通过
+
+### 处置
+
+- `profiles/work/.env`（600）写入 3 个键（`DINGTALK_CLIENT_ID/SECRET/ALLOW_ALL_USERS`），**飞书的 6 个键原样保留**
+- 写前验凭据：钉钉 `accessToken` 成功 ✓；预检无阻断；只重启一次
+- 回滚包：`/tmp/rb/dingtalk-work-20260926-214211/`
+
+### 验证结果（两个独立来源）
+
+1. **状态文件**：`dingtalk connected` + **`work:dingtalk connected`**（writer = 新 PID 2747163）；平台总数 **13**（7 feishu + 2 dingtalk + weixin + qqbot + api_server + webhook）；`served_profiles` = 7；钉钉握手超时 **0**
+2. **work 自己的日志**（`profiles/work/logs/gateway.log`）：
+
+   ```
+   21:45:04 [Dingtalk] Robot SDK initialized (media download)
+   21:45:04 [Dingtalk] Connected via Stream Mode
+   21:47:43 inbound message: platform=dingtalk user=MW chat=cidyDFvJ... msg='hello'
+   21:47:51 response ready: session=agent:work:dingtalk:dm:cidyDFvJ...
+   21:47:51 [Dingtalk] Sending response (179 chars)
+   21:48:03 _send_emotion: recall 🤔Thinking → reply 🥳Done
+   ```
+
+→ **`session=agent:work:...` 证明路由到了 work profile**（没串到 default）；收/跑/回/表情全通。
+
+### 结论与可复用经验
+
+- **多钉钉机器人共存 OK**：若两个适配器误用同一凭据，"同 app 只能一条长连接"会互相踢并产生重连/握手错误 —— 实测 0 超时、0 重连，且插件 `_credentials()` 是 **scope 感知**读取（`adapter.py:180-183` 专门为 multiplex 写了注释）。
+- **验证钉钉看这一行**：`[Dingtalk] Connected via Stream Mode`（比状态文件的 connected 更直接）。
+
+### 待办
+
+1. 剩余 5 个 profile（coding / exam / fitness / invest / music）各需独立钉钉应用。
+2. 白名单收紧：`DINGTALK_ALLOW_ALL_USERS=true` → `DINGTALK_ALLOWED_USERS=MW`（用户 ID 已从日志确认）。
+3. 主动推送（定时任务）需要静态机器人 webhook（`DINGTALK_WEBHOOK_URL`），可选。
+
+---
+
 ## 2026-09-26（第十三轮）: 接入钉钉 + 找到 WS 握手超时的元凶（IPv6）
 
 ### 已完成
