@@ -1341,6 +1341,17 @@ def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
         )
         if password_store:
             env["HERMES_DESKTOP_PASSWORD_STORE"] = password_store
+
+    # PM-managed installs: point Desktop at the PM launcher instead of letting it
+    # build a source-python backend. hermes_bootstrap injects the committed
+    # environment into sys.path at process boot, so an interpreter that does not
+    # match the committed one (a leftover repo venv on 3.11/3.12 next to a 3.14
+    # environment) dies on the first binary extension it touches -- pydantic_core,
+    # mcp, _cffi_backend. The launcher already owns the matching runtime. Absent
+    # shim (non-PM install) or an explicit override (env, Nix wrapper) wins.
+    launcher = Path(__file__).resolve().parent.parent / ".hermes" / "bin" / "hermes"
+    if launcher.is_file():
+        env.setdefault("HERMES_DESKTOP_HERMES", str(launcher))
     return env, config_electron_flags
 
 
