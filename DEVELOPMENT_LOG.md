@@ -4,6 +4,32 @@
 
 ---
 
+## 2026-09-26（第八轮）: work 飞书机器人接通 —— 双 profile 各自独立 bot
+
+### 已完成
+
+- `profiles/work/.env`（600）写入 6 项：`FEISHU_APP_ID=cli_a91d4c3cd2789bb3`… 、`FEISHU_DOMAIN=feishu`、`FEISHU_CONNECTION_MODE=websocket`、`FEISHU_ALLOW_ALL_USERS=true`、`FEISHU_GROUP_POLICY=open`。**群策略必须写进该 profile 自己的 .env** —— 多路复用下每个 profile 只读自己的 `.env`，default 的 `FEISHU_GROUP_POLICY` 不会继承。
+- API 预验（重启前先验钥匙，避免白重启）：`tenant_access_token` `code=0`；`bot/v3/info` 名称 **Work**；`im/v1/chats` `code=99991672`（`im:chat` 未开通/未发布，与 default 同）。
+- 预检 `--dry-run`：两份飞书凭据**互不冲突**（指纹不同），无 blocker。
+- 一次重启同时生效：default 的 `FEISHU_HOME_CHANNEL=oc_33d161a8b41acf28573e1ea858b28af1`（从其"Failed to get chat info for oc_…"日志里取得该私聊会话 id）+ work 的凭据。
+- 回滚包：`/tmp/rb/feishu-work-20260926-140621/`（含 `env.work`、`env.default`、状态快照）。
+
+### 验证结果
+
+- 网关 PID 952211、`active/running`、`NRestarts=0`；`served_profiles` = 7/7。
+- `gateway_state.json` 同时出现 **`feishu connected`（writer 952211）与 `work:feishu connected`（writer 952211）** —— 多路复用下平台状态**按 profile 分别上报**，键名形如 `<profile>:<platform>`。**这是本轮最重要的验证姿势**。
+- work 自己的日志 `profiles/work/logs/gateway.log`：`[Feishu] Connected in websocket mode (feishu)`，模块别名带 `__home_f77b1399bfa9`（= 该 profile 作用域的插件实例）。
+- ⚠ **profile 级日志不进 systemd journal**：`journalctl | grep 'Lark.*connected'` 只会看到 default 那条（这正是第一次计数只得到 1 条的原因）。**验证 work 必须看 `profiles/work/logs/gateway.log` 或状态文件的 `work:feishu`**。
+- 重启时旧进程的 `Event loop is closed` / `lark WS receive loop died` 是 **shutdown 噪音**（旧 PID 889983），不是回归。
+
+### 待办
+
+1. 用户在飞书私聊 **Work** 机器人做端到端确认（唯一未做的验证）。
+2. 两个 app 的 `im:chat:readonly` / `im:chat` 均未开通 → 每收一条消息会打一条 WARNING `Failed to get chat info`（不影响聊天）。补权限 + **重新发布版本**即可消除。
+3. 剩 5 个 profile（coding / exam / fitness / invest / music）照本流程复制。
+
+---
+
 ## 2026-09-26（第七轮）: default 飞书机器人接通 —— 卡在"权限未开通/未发布"
 
 ### 已完成
