@@ -40,6 +40,24 @@
 
 ---
 
+### 验证结果（用户实测通过 ✓）
+
+`~/.hermes/logs/gateway.log` 里的完整链路（21:38，`user=MW`）：
+
+```
+21:38:37 inbound message: platform=dingtalk user=MW chat=cidPwT0Mde... msg='hello'
+21:38:38 [Dingtalk] _send_emotion: reply 🤔Thinking
+21:38:42 response ready: platform=dingtalk session=agent:main:dingtalk:dm:cidPwT0Mde...
+21:38:42 [Dingtalk] Sending response (216 chars) to cidPwT0Mde...
+21:39:06 _send_emotion: recall 🤔Thinking → reply 🥳Done
+```
+
+→ 收、跑 agent（4s）、回、表情反馈（Thinking/Done）**全部工作**。同批启动日志：`Gateway running with 12 platform(s)`。
+
+**白名单字段确认**（`adapter.py:404/462-466/485`）：匹配 `sender_id`（即日志里的 `user=MW`）或 `sender_staff_id`，二者任一命中即可 → 将来把 `DINGTALK_ALLOW_ALL_USERS=true` 换成 `DINGTALK_ALLOWED_USERS=MW` 即可收紧。
+
+---
+
 ## 2026-09-26（第十二轮）: 7 个飞书机器人全部接通（default + 6 个 profile 各自独立 bot）
 
 ### 已完成
