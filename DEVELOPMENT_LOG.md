@@ -4,6 +4,33 @@
 
 ---
 
+## 2026-09-26（第七轮）: default 飞书机器人接通 —— 卡在"权限未开通/未发布"
+
+### 已完成
+
+- 凭据写入 `~/.hermes/.env`（权限 600）：`FEISHU_APP_ID=cli_a91daec09fb8dbd1` / `FEISHU_APP_SECRET`（已打码核对）、`FEISHU_DOMAIN=feishu`、`FEISHU_CONNECTION_MODE=websocket`、`FEISHU_ALLOW_ALL_USERS=true`、`FEISHU_GROUP_POLICY=open`（默认 `allowlist` + 空名单 = 群里**全部丢弃**，故显式放开）。
+- `hermes gateway migrate --multiplex --dry-run` → 无新阻断（飞书凭据只属 default）。
+- 回滚包：`/tmp/rb/feishu-20260926-135324/`（`.env`、`config.yaml`、`gateway_state.json`、状态快照）。
+- 重启后**飞书长连接建立**（日志原文）：`[Lark] connected to wss://msg-frontier.feishu.cn/ws/v2?... [conn_id=...]`；`gateway_state.json` 的 `feishu` 条目由**当天进程**写入（对比 9-16 那条 `writer_pid=155332` 的陈旧残留，已不会再误导）。
+- 网关：PID 889983、`active/running`、`served_profiles` = 7/7。
+
+### API 实测（判断后台配置是否齐全的可靠手段）
+
+| 检查 | 结果 | 结论 |
+|---|---|---|
+| `auth/v3/tenant_access_token/internal` | `code=0 ok` | App ID/Secret **正确** |
+| `bot/v3/info` | `code=0`，名称 `Hermes` | 机器人能力**已开** |
+| `im/v1/chats` | `code=99991672`「应用尚未开通所需的应用身份权限」 | **权限未添加或版本未发布** ← 唯一卡点 |
+
+### 待用户操作（阻塞项）
+
+1. 权限管理 → 添加 `im:message`、`im:message:send_as_bot`、`im:resource`、`im:chat`、`im:chat:readonly`。
+2. **事件与回调 → 长连接模式 → 订阅 `im.message.receive_v1`**（收消息必需）；（可选）回调加 `card.action.trigger` 供审批按钮用。
+3. **版本管理与发布 → 创建版本并发布**（企业应用可能需管理员审批）。⚠ **不发布则权限不生效**，这正是当前状态。
+4. 发布通过后私聊那个机器人；确认权限生效可复跑本文的 `im/v1/chats` 探测（`code=0` 即生效）。
+
+---
+
 ## 2026-09-26（第六轮）: PM 安装迁移 + multiplex 折叠 —— 7 个 profile 共用一个网关
 
 > 触发：用户问「PM 迁移是干嘛用的」→ 结论是"必须先做，否则飞书 SDK 装不上、任何 PM 启动路径都死"。用户授权「全做，但要能回滚、保可用性」。
