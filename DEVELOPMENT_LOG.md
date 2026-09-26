@@ -75,7 +75,44 @@ scripts/run_tests.sh tests/hermes_cli/
 
 （代价：新 store 要重新下载 CPython 3.14 + 工具 + 应用/测试依赖，约 1.5 GB / 10–20 分钟；换来"测试永远碰不到生产状态"。）
 
-### 顺带修掉一个真实的 fork 私有 delta 缺陷
+### 隔离 dev home 复跑（决定性对比 —— 证明那 95 个是环境问题）
+
+```bash
+export HERMES_HOME="$HOME/hermes-dev-data"
+export HERMES_RUNTIME_DIR="$HERMES_HOME/tools"
+scripts/run_tests.sh tests/hermes_cli/
+```
+
+| 运行方式 | 结果 |
+|---|---|
+| 生产 home（PM store/测试环境落在 `~/.hermes` 下） | **12935 passed / 95 failed / 296 skipped** |
+| **隔离 dev home（本次）** | **13034 passed / 4 failed / 296 skipped**（804.3s，同代码同机器） |
+
+**逐文件对照（生产 → 隔离）**：
+
+| 文件 | 生产 home | 隔离 dev home |
+|---|---|---|
+| `test_update_target_identity.py` | 31 ✗ | **31 ✓** |
+| `test_update_autostash.py` | 8 ✗ | **33 ✓** |
+| `test_web_server_profile_unification.py` | 7 ✗ | **28 ✓** |
+| `test_tui_npm_install.py` | 1 ✗ | **11 ✓** |
+
+→ 那 95 个**确认是环境问题**（`home_io_guard` 拒绝真实 home 下的 I/O），**不是代码回归**。
+
+**剩余 4 个失败**（与 fork 私有 delta 无关；其中前 2 个在生产 home 那次也照样失败 → 与布局无关）：
+
+1. `test_gateway_service.py::TestSystemUnitHermesHome::test_managed_node_makes_system_unit_independent_of_callers_path`
+2. `test_inventory_pricing.py::test_model_options_cold_pricing_fetch_runs_off_the_request_path`
+3. `test_user_providers_model_switch.py::test_list_authenticated_providers_enumerates_dict_format_models`
+4. `test_user_providers_model_switch.py::test_section3_probes_no_key_endpoint_with_singular_default_model`（断言 `singular default_model must not suppress live discovery`）
+
+**疑似本机环境因素**（待跟进，未证实）：今天 `pm install` 装的 **PM 托管 node** 进入 PATH（#1 正是测这条路径）；本机 **Ollama 正在 11434 运行**（#3/#4 测 live provider discovery，真实可达端点可能走了另一分支）。
+
+另有 **3 个 FLAKY 文件**（首次失败、重试通过；runner 明确要求 "fix the flake"）——上游 flake，记录待跟进。
+
+**代价**：dev home 占 **2.2 GB**（`~/hermes-dev-data/{cache,tools,installs}`）；换来"测试永远碰不到生产状态"。
+
+---
 
 `test_desktop_slash_registry.py` 失败：`apps/desktop/src/lib/desktop-slash-registry.json is stale`。原因：本 fork 多了 `/bridge`（微信↔TUI 桥）斜杠命令，但桌面端斜杠注册表的 dump 没同步 → **桌面端命令面板里看不到 `/bridge`**。
 

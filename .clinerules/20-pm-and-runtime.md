@@ -58,6 +58,15 @@ hermes: no dependency environment is committed for this install; run `hermes pm 
 - **测试环境已建（2026-09-26 16:24）**：`~/.hermes/installs/<key>/test-environment`（Python 3.14 + `dev`+`test` 组 + pytest）。**直接跑 `scripts/run_tests.sh <paths>` 即可** —— 它会在环境缺失/过期时自动激活构建（实测：一次运行同时建好 PM 环境与测试环境）。
 - **不要再用遗留 venv 跑测试**（`venv` 3.12 / `.venv` 3.11）：R13 的 3.14 site-packages 注入会让它们崩在二进制扩展上。
 - 实测基线（2026-09-26）：desktop 相关 6 个文件 **105 passed / 0 failed / 15 skipped**（跳过项为 macos/windows lane，属预期）；runner 自报 CI 等价形态 `(TZ=UTC LANG=C.UTF-8 PYTHONHASHSEED=0; clean env)`、`-j 12`、per-file subprocess 隔离。
+- **跑整目录 / 整套测试必须用隔离 dev home**：本机 PM store 与测试环境都落在真实 `~/.hermes` 下，而 `tests/home_io_guard.py` 拒绝对真实 home 的任何文件 I/O → 会产生 **~95 个假失败**（`TEST BUG: file I/O against the REAL hermes home`）。正确命令：
+
+  ```bash
+  HERMES_HOME="$HOME/hermes-dev-data" HERMES_RUNTIME_DIR="$HOME/hermes-dev-data/tools" \
+    scripts/run_tests.sh tests/hermes_cli/
+  ```
+
+  实测对照（同日、同代码、同机器）：生产 home **12935 passed / 95 failed** → 隔离 dev home **13034 passed / 4 failed**。dev home 占 ~2.2 GB。
+  单文件/小范围定向测试直接在生产 home 跑即可（不触碰 store 的测试不受影响，如 desktop 那 6 个文件 105 全绿）。
 
 ## R11 · 记录义务
 
