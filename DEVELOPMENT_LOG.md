@@ -4,6 +4,48 @@
 
 ---
 
+## 2026-09-26（第十六轮）: 按用户要求停用飞书（**只动配置，不动仓库代码**）
+
+### 决策与理由
+
+用户要求"把飞书的代码删掉" → **只做配置层停用**，仓库代码一行未动：
+
+| 方案 | 选择 | 理由 |
+|---|---|---|
+| 删 `.env` 里的飞书凭据（注释） | ✅ 采用 | 立即停用、可一条命令恢复、零风险 |
+| 删 `plugins/platforms/feishu/` 代码 | ❌ 否决 | 那是**上游代码**：每轮同步都会冲突/被恢复；且会让刚建立的 `tests/hermes_cli/` 基线变红 |
+
+### 处置
+
+- 7 个 `.env` 的 `FEISHU_*` 全部注释（default 7 行 / 其余 profile 各 6 行），带标记 `# [fork 2026-09-26] feishu disabled by request — uncomment to restore`；每个文件**生效中的 `FEISHU_` 行 = 0**。
+- 回滚包：`/tmp/rb/unfeishu-232032/`（7 个 `.env` + 状态快照）。
+
+### 验证结果
+
+```
+新进程(3075627):  Lark WS 连接行 = 0     feishu 相关行 = 0     "Failed to get chat info" 警告 = 0
+当前进程写入的平台数 = 11（7 钉钉 + 微信 + QQ + api_server + webhook）← 已无 feishu
+7 个钉钉条目：全部 connected（writer = 3075627）
+```
+
+- 状态文件里**残留 1 条 `feishu: disconnected`**，`writer_pid` = 旧进程（2868590）→ 陈旧条目，已标记 disconnected，不影响判断（**判活看 `writer_pid`**，这是本日第三次用这一招识别残留）。
+- 启动瞬间仍有 3 条钉钉握手超时（23:22:03，随后 7 个全部 connected）→ `force_ipv4` 后不再"卡死"，但**启动期偶发一次抖动**属现状。
+
+### 恢复飞书的方法（若将来要用）
+
+```bash
+# 取消 7 个 .env 里 "# [fork 2026-09-26] feishu disabled" 段落中 FEISHU_* 行的注释，然后
+systemctl --user restart hermes-gateway
+```
+
+### 待办
+
+1. 钉钉白名单收紧（`DINGTALK_ALLOW_ALL_USERS=true` → `DINGTALK_ALLOWED_USERS=MW`）。
+2. 飞书那几个应用若确定不再使用，可在飞书开放平台自行删除（本机已不再引用）。
+3. 微信桥长期未用：若要用，先给微信 bot 发一条消息激活 iLink 配对。
+
+---
+
 ## 2026-09-26（第十五轮）: 7 个钉钉机器人全部接通（default + 6 个 profile）
 
 ### 处置
