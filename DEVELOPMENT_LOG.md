@@ -4,6 +4,56 @@
 
 ---
 
+## 2026-09-27（第十七轮）: "qwen3.8-max 每次退回 deepseek" 的根因 —— 阿里云**内容审核**，不是模型问题
+
+### 现象
+
+用户反馈：`qwen3.8-max` 不好调用，每次都回退 deepseek。
+
+### 排查链（全部有实测）
+
+1. **日志原文**（`profiles/work/logs/agent.log`，2026-09-27 22:17）：
+
+   ```
+   openai.BadRequestError: data: {"error":{"code":"data_inspection_failed","param":null,
+     "message":"Input text data may contain inappropriate content.","type":"data_inspection_failed"}}
+   … API call failed (attempt 1/3, not retryable) error_type=BadRequestError provider=custom:bailian
+   … Fallback activated: qwen3.8-max → deepseek-v4-flash-vision-exp (deepseek)
+   ```
+
+   → **HTTP 400 不可重试**，Hermes 按设计立刻回退。
+
+2. **模型可用性实测**（用 `config.yaml` 里 `providers[name=bailian].api_key`，注意**不是** profile `.env` 里那把 —— 两把不同，用 .env 那把会 401）：
+
+   ```
+   /models            → HTTP 200，16 个模型，qwen3.8-max 在列表 ✓
+   qwen3.8-max  良性请求 → HTTP 200，正常回复 ✓
+   qwen3.8-flash 良性请求 → HTTP 200，正常回复 ✓
+   ```
+
+3. **回退链第二顺位也已失效**：`Fallback skip: zai/glm-5.3-flash credential pool is exhausted (every entry in cooldown)`；desktop 日志另有 `unavailable (billing or quota exhausted)`。
+
+### 结论
+
+- **不是 Hermes 的问题，也不是模型不可用**：`qwen3.8-max` 本身工作正常。
+- 真因是**阿里云内容审核**拦了**那次请求的输入文本**（`data_inspection_failed`）。
+- 为什么"每次都"回退：**对话历史每轮都会重发**；一旦历史里有一段被审核标记的文本，**之后每一轮都会被拒** → 该会话进入"永久回退"状态，直到历史被压缩/清空。
+- 又因为**第二顺位（zai/glm-5.3-flash）额度已耗尽**，实际每次都直接落到 deepseek。
+- 桌面端把该 400 概括成 "request format rejected"（Hermes 的错误分类文案），**措辞有误导**：实为内容审核拒绝，与请求格式无关。
+
+### 建议（未擅自执行，改动用户会话/配置）
+
+1. **压缩或重开会话**：`/compact` 或新会话 → 丢掉被标记的旧文本，主模型即可恢复（推荐）。
+2. 或**给该会话固定用 deepseek**，避免"每轮先试再回退"的额外延迟。
+3. **zai/glm 额度**需用户自行充值或从 `fallback_providers` 里替换为可用模型（改动需用户确认）。
+4. 如需要，可**分段重放该会话最近的输入**逐段定位触发审核的具体文本（会把该内容再发给阿里云，需用户同意）。
+
+### 附带确认（本机凭据现状）
+
+- `~/.hermes/.env`（default）**没有** `BAILIAN_API_KEY`；6 个 profile 各有一把（指纹 `e99682`），而 `config.yaml` 的 `providers[bailian].api_key`（`sk-sp-H.DR…`）是另一把 —— **实际生效的是 config 里那把**。
+
+---
+
 ## 2026-09-26（第十六轮）: 按用户要求停用飞书（**只动配置，不动仓库代码**）
 
 ### 决策与理由
