@@ -4,6 +4,59 @@
 
 ---
 
+## 2026-10-01（第十八轮）: 钉钉补上本地上传（`send_image_file` / `send_document`）—— 静态验证通过，**实网未验证**
+
+### 背景
+
+`plugins/platforms/dingtalk/adapter.py` 里两个方法此前是**硬失败**：
+
+```python
+async def send_image_file(...):  return SendResult(success=False, error=_NO_LOCAL_UPLOAD % ("image uploads", "media upload"))
+async def send_document(...):    return SendResult(success=False, error=_NO_LOCAL_UPLOAD % ("file attachments", "message send"))
+```
+
+（第 557 / 564 行附近）——会话 webhook 只能回 markdown/text，所以本地图片与文件一律发不出去。
+
+### 改动（工作区里已存在，本轮提交；`+94/−5`）
+
+- 新增常量：`_MEDIA_UPLOAD_URL`（`oapi.dingtalk.com/media/upload`）、`_DINGTALK_FILE_MAX_BYTES`=20 MiB、`_DINGTALK_IMAGE_MAX_BYTES`=10 MiB、`_DINGTALK_TYPE_SUFFIXES`（11 个后缀 → `fileType`）。
+- 新增 `_upload_media()`（第 578 行）：`media/upload` 上传，返回 `(media_id, error)`，带大小上限与错误分类。
+- 新增 `_send_file_message()`（第 605 行）：按会话类型分流 —— 群聊走 `/v1.0/robot/groupMessages/send`（`openConversationId`），单聊走 `/v1.0/robot/oToMessages/batchSend`（`userIds=[sender_staff_id]`）；无 `sender_staff_id` 缓存时返回可读错误（单聊无法主动发起）。
+- 两个方法的 docstring 从"不能上传"改为 OpenAPI 路径说明。
+
+### 本轮顺手清理（零行为变化，两条）
+
+1. 删除 `_NO_LOCAL_UPLOAD` —— 全仓 `grep` 后**零引用**（原两个使用点都已被上面两个方法取代），属死常量。
+2. `{"fileType": dt_type if dt_type != "file" else "file"}` → `{"fileType": dt_type}` —— 恒等三元表达式（两个分支同值）。
+
+### 验证结果
+
+- `py_compile` + `ast.parse`：OK。
+- `ruff check`（项目 `select = ["PLW1514","ASYNC210","ASYNC220","ASYNC221","ASYNC251","TID251"]`）：**All checks passed**。
+  （`ruff format --check` 会报该文件需重排，但这是**改动前既有**的状态，且 `format` 不在本仓 lint 门禁里。）
+- 定向测试（隔离 dev home，R10 口径）：
+  `HERMES_HOME=$HOME/hermes-dev-data HERMES_RUNTIME_DIR=$HOME/hermes-dev-data/tools scripts/run_tests.sh tests/gateway/test_dingtalk.py tests/gateway/test_dingtalk_reconnect_circuit_breaker.py tests/plugins/platforms/`
+  → **30 文件 / 214 passed / 0 failed / 2 skipped**（rc=0）。两个 dingtalk 测试文件本就**没有**覆盖 `send_image_file` / `send_document`（grep 零命中），所以"测试绿"**不能**证明上传路径可用。
+
+### 未验证项与风险（**未擅自修**，需用户决策）
+
+1. **`sampleImageMsg` 的 msgParam 键名**：代码写 `{"mediaId": media_id}`；钉钉官方图片消息示例用的是 `photoURL`（值同样取 `media/upload` 返回的 media_id）。已确认 `dingtalk_stream 0.24.3` 与 `alibabacloud_dingtalk 2.2.42` 内均无 `sampleImageMsg` / `photoURL` 先例可对照，官方文档页为 JS 渲染、抓不到正文。**若键名不对，图片会被钉钉拒收。**
+2. **token 类型**：`_MEDIA_UPLOAD_URL` 是**旧版** `oapi.dingtalk.com` 端点，而 `_get_access_token()` 取的是 v1.0 的 `x-acs-dingtalk-access-token`。两代 token 是否互通未经验证。
+3. **实网从未跑过**：`~/.hermes/` 与 6 个 profile 的 `logs/` 中，`media/upload`、`sampleImageMsg`、`sampleFile` **零条**记录 → 该路径在自建 7 个机器人上是冷路径。
+
+### 待办
+
+- [ ] 实地探测上述 3 项（向用户**真实**钉钉会话发一张图 + 一个文件，看 `errcode`）。**未自动执行的原因**：会向用户正在使用的钉钉通道发出真实消息，属对外可见副作用，需用户明确同意；且探测需要一次已缓存 `sender_staff_id` 的单聊（或一个群 `chat_id`）。
+- [ ] 若探测确认键名应为 `photoURL`，改 `send_image_file` 那一行即可（单点）。
+- [ ] 可选：把 `media/upload` 的 token 换成旧版 `gettoken` 或改用 v1.0 上传端点 —— 依探测结果决定。
+
+### 下次同步的注意点
+
+- `plugins/platforms/dingtalk/adapter.py` 现已是**fork 重叠文件**：相对 `origin/main` 分叉 `+138/−9`。上游 `plugins/` 变更频繁（本轮预演该目录 37 个文件变动），合并后必须按 R6 复核（本轮**不在**既有 R6 清单里，属**新增**）。
+- 本波上游 `apps/desktop` 有 1007 个文件变动、且 `apps/desktop/electron/main.ts` 与 `apps/desktop/src/store/gateway.ts` 预演即冲突 —— 与本轮改动无关，但下次同步要预留处理时间。
+
+---
+
 ## 2026-09-27（第十七轮）: "qwen3.8-max 每次退回 deepseek" 的根因 —— 阿里云**内容审核**，不是模型问题
 
 ### 现象

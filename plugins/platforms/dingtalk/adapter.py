@@ -11,6 +11,7 @@ import time
 import traceback
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Set
 
 # Optional SDKs: catch broad Exception, not just ImportError — their transitive cryptography
@@ -127,7 +128,13 @@ _EMOTION_BG = "im_bg_1"
 _EMOTION_SDK = {recall: (f"Robot{v}EmotionRequestTextEmotion", f"Robot{v}EmotionRequest", f"Robot{v}EmotionHeaders", f"robot_{v.lower()}_emotion_with_options_async")
                 for recall, v in ((True, "Recall"), (False, "Reply"))}
 _NUMBERED_RE = re.compile(r"^\d+\.\s")
-_NO_LOCAL_UPLOAD = "DingTalk session webhook replies do not support local %s. Only markdown/text replies are supported without OpenAPI %s."
+_MEDIA_UPLOAD_URL = "https://oapi.dingtalk.com/media/upload"
+_DINGTALK_FILE_MAX_BYTES = 20 * 1024 * 1024  # media/upload type=file cap
+_DINGTALK_IMAGE_MAX_BYTES = 10 * 1024 * 1024  # media/upload type=image cap (official limit 10MB)
+_DINGTALK_TYPE_SUFFIXES = {
+    "doc": "doc", "docx": "docx", "xls": "xls", "xlsx": "xlsx", "ppt": "ppt", "pptx": "pptx",
+    "zip": "zip", "pdf": "pdf", "rar": "rar", "7z": "7z", "txt": "txt",
+}  # media/upload `file` type accepts ONLY these extensions; everything else degrades to "其他文件".
 
 
 def _csv_set(raw: Any) -> Set[str]:
@@ -548,12 +555,94 @@ class DingTalkAdapter(BasePlatformAdapter):
         return await self.send(chat_id=chat_id, content=f"{caption}\n\n{image_block}" if caption else image_block, reply_to=reply_to, metadata=metadata)
 
     async def send_image_file(self, chat_id: str, image_path: str, caption: Optional[str] = None, reply_to: Optional[str] = None, metadata=None, **kwargs) -> SendResult:
-        """Webhook replies cannot upload local images."""
-        return SendResult(success=False, error=_NO_LOCAL_UPLOAD % ("image uploads", "media upload"))
+        """Send a local image via OpenAPI: media/upload (type=image) -> sampleImageMsg."""
+        media_id, err = await self._upload_media(image_path, "image", _DINGTALK_IMAGE_MAX_BYTES)
+        if err:
+            return SendResult(success=False, error=err)
+        return await self._send_file_message(chat_id, "sampleImageMsg", {"mediaId": media_id}, caption)
 
     async def send_document(self, chat_id: str, file_path: str, caption: Optional[str] = None, file_name: Optional[str] = None, reply_to=None, metadata=None, **kwargs) -> SendResult:
-        """Webhook replies cannot upload local files."""
-        return SendResult(success=False, error=_NO_LOCAL_UPLOAD % ("file attachments", "message send"))
+        """Send a local file via OpenAPI: media/upload (type=file) -> sampleFile."""
+        name = file_name or Path(file_path).name
+        suffix = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+        dt_type = _DINGTALK_TYPE_SUFFIXES.get(suffix, "file")
+        media_id, err = await self._upload_media(file_path, "file", _DINGTALK_FILE_MAX_BYTES)
+        if err:
+            return SendResult(success=False, error=err)
+        return await self._send_file_message(
+            chat_id, "sampleFile",
+            {"mediaId": media_id, "fileName": name, "fileType": dt_type},
+            caption,
+        )
+
+    async def _upload_media(self, local_path: str, kind: str, max_bytes: int) -> tuple[Optional[str], Optional[str]]:
+        """Upload a local file to DingTalk media storage; returns (media_id, error)."""
+        if not self._client_id:
+            return None, "DingTalk credentials not configured; cannot upload media"
+        try:
+            path = Path(local_path)
+            size = path.stat().st_size
+            if size > max_bytes:
+                return None, f"File too large for DingTalk {kind} upload: {size} bytes (limit {max_bytes})"
+            token = await self._get_access_token()
+            if not token:
+                return None, "Failed to obtain access token for media upload"
+            files = {"media": (path.name, path.read_bytes(), "application/octet-stream")}
+            resp = await self._http_client.post(
+                _MEDIA_UPLOAD_URL, params={"access_token": token, "type": kind},
+                files=files, timeout=60.0,
+            )
+            data = resp.json()
+            if data.get("errcode") == 0 and data.get("media_id"):
+                logger.info("[%s] media/upload ok: %s -> %s", self.name, path.name, data["media_id"])
+                return data["media_id"], None
+            logger.warning("[%s] media/upload failed: %s", self.name, str(data)[:300])
+            return None, f"DingTalk media upload rejected: {str(data.get('errmsg', data))[:200]}"
+        except Exception as e:
+            logger.error("[%s] media upload error: %s", self.name, e)
+            return None, f"Media upload error: {e}"
+
+    async def _send_file_message(self, chat_id: str, msg_key: str, msg_param: dict, caption: Optional[str] = None) -> SendResult:
+        """Deliver a native message via robot OpenAPI, routed by conversation type.
+
+        DM  -> /v1.0/robot/oToMessages/batchSend (requires the app's robot capability
+              + per-user auth at first contact; recipient is the cached inbound sender_staff_id)
+        群聊 -> /v1.0/robot/groupMessages/send (openConversationId == chat_id)
+        """
+        message = self._message_contexts.get(chat_id)
+        robot_code = (getattr(message, "robot_code", None) or self._robot_code) if message else self._robot_code
+        is_group = bool(message) and str(getattr(message, "conversation_type", "1")) == "2"
+        if message is None and chat_id.startswith("cid"):
+            is_group = True  # cached webhook origin (cron/home delivery): treat as group-addressable space
+        recipient, target_field = (chat_id, "openConversationId") if is_group else (
+            (getattr(message, "sender_staff_id", "") if message else ""), "userId")
+        if not recipient:
+            return SendResult(success=False, error=(
+                "No sender_staff_id on record for this DM — DingTalk OpenAPI cannot proactively "
+                "start a chat; wait for the user to message the bot once, or configure openapi.chat_id"))
+        token = await self._get_access_token()
+        if not token:
+            return SendResult(success=False, error="Failed to obtain access token")
+        url = ("https://api.dingtalk.com/v1.0/robot/groupMessages/send" if is_group
+               else "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+        body = {"robotCode": robot_code, "msgKey": msg_key, "msgParam": json.dumps(msg_param, ensure_ascii=False)}
+        if is_group:
+            body[target_field] = recipient
+        else:
+            body["userIds"] = [recipient]
+        headers = {"x-acs-dingtalk-access-token": token, "Content-Type": "application/json"}
+        try:
+            resp = await self._http_client.post(url, json=body, headers=headers, timeout=20.0)
+            if resp.status_code < 300:
+                logger.info("[%s] OpenAPI %s sent to %s (%s)", self.name, msg_key, recipient[:24], "group" if is_group else "dm")
+                if caption:
+                    await self.send(chat_id=chat_id, content=caption)
+                return SendResult(success=True, message_id=uuid.uuid4().hex[:12])
+            logger.warning("[%s] OpenAPI send failed HTTP %d: %s", self.name, resp.status_code, resp.text[:300])
+            return SendResult(success=False, error=f"HTTP {resp.status_code}: {resp.text[:200]}")
+        except Exception as e:
+            logger.error("[%s] OpenAPI send error: %s", self.name, e)
+            return SendResult(success=False, error=str(e))
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Return basic info about a DingTalk conversation."""
