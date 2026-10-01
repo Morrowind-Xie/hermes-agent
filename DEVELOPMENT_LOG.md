@@ -4,6 +4,114 @@
 
 ---
 
+## 2026-10-01（第二十一轮）: 主力模型 qwen3.8 → MiMo（`mimo-v2.6-pro`），7 个 home 全量切换 + cron 解 pin
+
+### 需求
+
+把主力模型从 `qwen3.8-flash`（阿里云百炼）换成小米 **`mimo-v2.6-pro`**，端点 `https://token-plan-cn.xiaomimimo.com/v1`；备用模型维持 deepseek flash 不变；**所有 qwen3.8 的引用全部换成 mimo**。
+
+### 先实测端点，再动配置
+
+```bash
+GET  /v1/models            -> 200，8 个模型：mimo-v2.5 / -asr / -pro / -tts / -tts-voiceclone /
+                              -tts-voicedesign / mimo-v2.6-flash / mimo-v2.6-pro
+POST /v1/chat/completions  -> 200，model=mimo-v2.6-pro，content="ok"（返回 reasoning_content，思考型）
+```
+
+### 改动（7 个 home：default + coding/exam/fitness/invest/music/work）
+
+每个 `config.yaml` **只动两处**：
+
+```yaml
+model:
+  default: qwen3.8-flash   ->  mimo-v2.6-pro
+  provider: bailian        ->  mimo
+  base_url: https://...maas.aliyuncs.com/compatible-mode/v1
+                           ->  https://token-plan-cn.xiaomimimo.com/v1
+custom_providers:
+  - name: mimo                            # 新增
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+    api_key: tp-…wsrn（51 字符）
+    api_mode: chat_completions
+    models:
+      mimo-v2.6-pro: {}
+```
+
+`fallback_providers` **未动**（仍是 `zai/glm-5.3-flash` → `deepseek/deepseek-v4-flash-vision-exp`）。
+
+**落地方式（有个坑）**：`hermes config set custom_providers.4.name mimo` 直接 `IndexError: list index out of range` —— **CLI 无法追加新的列表元素**。故改用 CLI 底层同一套官方读写 API（`hermes_cli.config.load_config` / `save_config`），**每个 home 一个独立进程**（配置模块按路径缓存，一个进程内跨 home 会串味）。脚本：`/tmp/mimo/switch_model_mimo.py`。
+
+### 验证（三层，全部实测）
+
+1. **解析层**：`resolve_runtime_provider(requested=None)` →
+   `provider="custom"`、`requested_provider="mimo"`、`source="pool:custom:mimo"`、`base_url=https://token-plan-cn.xiaomimimo.com/v1`、`api_key=<51 字符 …wsrn>`；
+   `cron.jobs._main_model_pin()` → **`('custom', 'mimo-v2.6-pro')`**。
+2. **端到端（真实 agent turn）**：`hermes chat -q 'Reply with exactly the single word: ok' --oneshot`（**跑了 7 个 home 里的 default**）→ 回复 `ok`，会话 `20261001_132626_b6a08e`（6 秒）。`agent.log` 原文：
+   ```
+   OpenAI client created provider=custom base_url=https://token-plan-cn.xiaomimimo.com/v1 model=mimo-v2.6-pro
+   agent.turn_context: model=mimo-v2.6-pro provider=custom platform=cli
+   API call #1: model=mimo-v2.6-pro provider=custom in=41556 out=13 latency=5.6s cache=12288/41556 (30%)
+   Turn ended: finish_reason=stop
+   ```
+   并且 **vision / auxiliary / title_generation 也自动跟随**（`Vision auto-detect: using main provider mimo`、`Auxiliary title_generation: using custom (mimo-v2.6-pro) at https://token-plan-cn.xiaomimimo.com/v1`）。
+   （注：先用 `run_agent.py`（legacy 入口）在**临时 home** 里试过，它不读 `model.default`、退回 OpenRouter 空模型 → **legacy 入口不可用于此类验证**；而临时 home 又因 `installs/` 在 `HERMES_HOME` 下会让 PM shim 找不到 `ruamel` —— 两个死路都试过，最终用真实 home 的 `hermes chat`。）
+3. **逐 home 复核**：7 个 home 的 `config get model.default/provider/base_url` 全部为 `mimo-v2.6-pro / mimo / https://token-plan-cn.xiaomimimo.com/v1`。
+
+### cron：真正的「还有 qwen3.8 在用」的地方
+
+7 个 home 的 `cron/jobs.json` 里查出 **1 个任务被显式 pin 到 `custom/qwen3.8-flash`**：
+
+| job | 名称 | 处置 |
+|---|---|---|
+| `beeb41a12d4a` | memory月度复盘（每月1号8点） | pin `custom/qwen3.8-flash` → **`custom/mimo-v2.6-pro`** |
+
+**踩到的坑**：先跑 `hermes cron edit beeb41a12d4a --pin` 是**完全 no-op**。源码 `cron/jobs.py::_apply_pin_update`：
+
+```python
+if pinned:
+    if not _normalize_job_optional_text(job.get("model")):   # ← 只在任务"没有" model 时才落 pin
+        updates["provider"], updates["model"] = _main_model_pin()
+```
+
+→ 已有 model 的任务必须显式 `--provider/--model`。故实际命令是
+`hermes cron edit beeb41a12d4a --provider custom --model mimo-v2.6-pro`（provider 用 `custom`，来自 `_main_model_pin()` 的实测返回值）。
+
+另有 **3 个 invest 任务** `snapshot=custom/qwen3.8-flash` 且未 pin（`95d8cbb3bc70` / `6b66b84c519d` / `3f44da1fa62f`）—— 新模型一来它们会被 drift guard 判定"配置漂移"而**静默跳过（死锁：不跑就永远刷不掉 snapshot）**。已对三者执行 `hermes -p invest cron edit <id> --pin`（任务无 model，`--pin` 生效），现在都锁在 `custom/mimo-v2.6-pro`。
+
+### 副作用（**上游自带的配置迁移**，非本意改动）
+
+`save_config` 顺带把 `_config_version` 从 40/46 推到 **49**，并应用了迁移链：
+
+| 键 | 变化 | 依据 |
+|---|---|---|
+| `curator.stale_after_days` | 30 → **14** | `hermes_cli/config_migrations.py:789` 显式写着 `section="curator", key="stale_after_days", old=30, new=14` |
+| `curator.archive_after_days` | 90 → **30** | 同上批迁移（`agent/curator.py:32` 的默认即 `14, 30`） |
+| `docker_image` / `singularity_image` / `modal_image` / `daytona_image` / `vercel_runtime` | 键被删 | 值与新默认**完全相同** → `strip_defaults` 剥离，**生效值不变** |
+
+→ 这些是**上游设计的迁移**，任何一次官方配置写入（`hermes config set`、`hermes config migrate`）都会触发，**故保留不回退**；语义是**技能策展器更快把闲置技能判为过期/归档（14/30 天）**。若你更想保留 30/90，一条 `hermes -p <p> config set curator.stale_after_days 30` 即可。
+
+### 残留的 qwen3.8（**未动，属发现型缓存**）
+
+bailian 的 `custom_providers[].models` 目录里仍有 `qwen3.8-max: {}` / `qwen3.8-flash: {}`（2 处/文件，共 14 处），该 provider 带 `models_discovered: true` —— 这是**该端点"能提供什么"的缓存**，不是任何"选择"；删掉也会在下次发现时被重新写回。若要彻底不显示，需要关掉该 provider 的发现或直接删掉 bailian 条目（你没要求，未动）。
+
+### 回滚
+
+改动前的 7 份配置快照在 **`/tmp/rb/20261001-124719/`**（`config.yaml` + `config.<profile>.yaml`，12:47 建于本轮改动之前）。回滚 = 用快照覆盖 + 把 `mimo` 条目删掉即可；cron 侧 `hermes cron edit <id> --unpin` / `--model qwen3.8-flash --provider custom`。
+
+### 下次的注意点 / 待办
+
+- **`hermes config set` 不能新增列表元素**（`IndexError`）；要改 `custom_providers` 这类列表，用 `load_config/save_config` 且**每 home 一进程**。
+- **`hermes cron edit --pin` 对已有 pin 的任务是 no-op**；不要用它"重签"，要显式 `--provider/--model`。
+- **`cron.jobs._main_model_pin()` = `('custom', '<model>')`**：自定义 provider 的内核名恒为 `custom`，`--provider` 要写 `custom` 而不是 `mimo`。
+- 真实配置迁移会随**任何一次**官方写入发生（本轮 `_config_version` → 49）；动配置前先存快照。
+- [ ] 4 个 cron 仍因 `snapshot=zai/glm-5.3` 被 drift_skip 拦着：`cb7bc4343e75`（已禁用）、`94fb71b0fbc8`（每日推进汇总）、`e94615ca98a1`（目标三要素采集）、`6de9d3a911e0`（记忆路由器）—— 同款死锁，需要各自 `--pin` 才能复活；**未自动执行**（它们不是 qwen3.8，属另一笔账，且 pin 会锁死模型）。
+- [ ] 备用链第一顺位 `zai/glm-5.3-flash` 在第十七轮就已被记为**额度耗尽**；主力换成 mimo 后，是否把第一顺位也换成 `mimo-v2.6-flash` 或去掉 zai，待你定。
+- [ ] 本轮验证留下的会话 `20261001_132626_b6a08e`（default home，2 条消息）可删。
+- [ ] 第十八轮的 `sampleImageMsg` msgParam 键名（`mediaId` vs `photoURL`）仍待实网探测。
+
+---
+
+
 ## 2026-10-01（第二十轮）: 机器 12:43 重启 → 合并后的代码已自动上线并验证健康
 
 ### 事件
