@@ -4,6 +4,94 @@
 
 ---
 
+## 2026-10-01（第二十三轮）: 澄清 cron「drift_skip」——机制**已不存在**，并撤回上一轮的错误处置
+
+### 问题
+
+用户问：4 个 cron（`94fb71b0fbc8` / `e94615ca98a1` / `6de9d3a911e0` / `cb7bc4343e75`）的 drift_skip 是怎么产生的、怎么解决。
+
+### 结论（先说答案）
+
+**那个机制在当前代码里已经不存在了；这 4 个任务今天根本没被拦。** 所以"怎么解决"= **不需要解决**，它们是**遗留字段 + 陈旧错误记录**。
+
+**实测证据**（不是推断）：
+
+| job | 名称 | `last_run_at` | 实况 |
+|---|---|---|---|
+| `e94615ca98a1` | 目标三要素采集 | **2026-10-01 14:00:26**（当天，每 15 分钟） | `last_status=ok`，`failure_streak=0`，已跑 **3262** 次 |
+| `6de9d3a911e0` | 记忆路由器 | **2026-10-01 13:32:46**（当天） | `ok`，已跑 79 次 |
+| `94fb71b0fbc8` | 每日推进汇总 | **2026-09-30 20:00:21**（准点） | `delivery_failed`（**投递**问题），`failure_streak=0`，next=10-01 20:00 |
+| `cb7bc4343e75` | memory整理周检（周一9点） | 2026-09-09 | **`enabled=False` + `state=completed`** —— `repeat.times=12, completed=12`，**按预算跑完自动退休**，不是被拦 |
+
+另：`hermes cron doctor`（官方诊断）对这 4 个任务**零条** drift/snapshot 相关告警。
+
+### 机制史（带 commit，说明为什么现在搜不到那段文案）
+
+```
+a4e61ddf04  fix(cron): fail closed when an unpinned job's provider drifts from creation snapshot (#44585)   ← 引入 drift_skip
+e6ce8c37f1  fix(cron): drift-guard skips alert once per job, not once per tick
+7e4d02fef5  fix(cron): unpinned jobs run on their creation-snapshot model instead of failing closed        ← 不再 fail
+0037a4b17a  feat(cron): add resnap action to adopt the current global inference default
+0469740ab3  feat(cron): jobs follow the main agent model at fire time; `pinned` locks it on request        ← 现设计
+bcff0a920e  test(cron): replace fail-closed drift tests with snapshot-as-pin invariants
+```
+
+**产生经过**：这些任务创建于 **2026-08-15**，当时全局主模型是 `zai/glm-5.3` → 旧代码把 `provider_snapshot=zai` / `model_snapshot=glm-5.3` 写进任务记录。后来主模型漂到 `custom/qwen3.8-flash`，`a4e61ddf04` 的 **fail-closed** 守卫就拒绝运行（"防止在任务并非为之创建的新模型上静默花钱"），于是 `last_error` 留下那段文案、`drift_alerted=true`、`failure_streak` 涨到 10。
+
+**现状**（`tests/cron/test_cron_provider_pin.py` 开头的契约原文）：
+
+> Unpinned cron jobs run on the main agent model at fire time; `pinned` locks it.
+> **There is no creation-time snapshot axis any more**: a record that still carries legacy
+> `provider_snapshot` / `model_snapshot` keys **follows the main model**.
+
+→ 遗留 snapshot 键被**忽略**；未 pin 的任务在**触发时**读当前主模型；`pinned` 才是"把当时的主模型锁到这个任务"。**`resnap` 子命令也已一并移除**（`hermes cron` 现有子命令里没有它），所以没有官方命令去清这些遗留字段 —— 但它们不影响运行。
+
+### 撤回上一轮的错误处置（我的错，已更正）
+
+第二十一轮我把 **3 个 invest 任务**（`95d8cbb3bc70` / `6b66b84c519d` / `3f44da1fa62f`，`snapshot=custom/qwen3.8-flash`）`--pin` 了，理由是"会再次 drift_skip 死锁"。**前提是错的** —— 那个守卫早就没了。副作用不止多余：
+
+```python
+# cron/scheduler.py::_job_fallback_chain
+return scoped_fallback_chain(get_fallback_chain(cfg), None, pinned=_job_route_pinned(job), owner="cron job")
+```
+
+**pinned 任务不继承全局 `fallback_providers`**（这是有意的成本控制），而且从此不再跟随主模型 —— 等于我把 3 个任务从"跟随主模型 + 带 deepseek 兜底"降级成"锁死单一模型 + 无兜底"。
+
+→ 已全部 `hermes -p invest cron edit <id> --unpin` 还原（现为 `pin=None/None`），恢复跟随主模型并继承备用链。
+
+其余 pin 都是**用户自己早先设的**，一律未动：`beeb41a12d4a`（第二十一轮已从 qwen3.8-flash 改指 `custom/mimo-v2.6-pro`）+ 4 个 `deepseek/deepseek-flash`。
+
+### 本次顺带发现的真正问题：cron **投递**全线告警
+
+`hermes cron doctor` 报的**几乎全是投递**，不是模型：
+
+| 症状 | 涉及 |
+|---|---|
+| `DingTalk not configured. Set DINGTALK_WEBHOOK_URL env var or webhook_url in dingtalk platform extra con…` | `74e39dc63d76` / `14c80111bc94` / `94fb71b0fbc8` / `766aa2070e90` |
+| `live adapter send failed: No valid session_webhook available. Reply must follow an incoming message.` | `e1412121cf7a` / `beeb41a12d4a` / `bc45a8b93f10` |
+| weixin：`iLink sendmessage session not ready`（承接第二十轮）/ `rate limited; cooldown active 30s` | `af8409997d25` / `647d49e5166a` |
+| `active job has no next_run_at` | `62005b2c2091` |
+| 上一次触发迟到（15m / 1h13m / catch-up 7h11m） | `a6cb2a2fa2ee` / `78e021fed026` / `6b14c42d327f` 等 |
+
+→ DingTalk 的**会话 webhook 只在"有入站消息之后"才存在**，所以"主动推送"型 cron 投到 dingtalk 会失败；要么给它配 `webhook_url` / `DINGTALK_WEBHOOK_URL`（群机器人 webhook），要么改投递目标。
+
+### 注意点
+
+- **别再用"`--pin` 解 drift_skip"** —— 那个设计已废弃。pin 现在的语义是"把当前主模型锁到这个任务"，是**成本控制**手段，不是解药；它还会**切断该任务的全局备用链**。
+- 遗留的 `provider_snapshot`/`model_snapshot`/`drift_alerted`/旧 `last_error` 属**惰性数据**，无 CLI 可清（`resnap` 已移除），不用管。
+- 判断"任务是否真的在跑"看 **`last_run_at` / `next_run_at` / `state`**，不要看 `last_error`（它不会自动清）。
+
+### 待办
+
+- [ ] **投递修复**（你现在的真问题）：给 dingtalk 目标补 `webhook_url`/`DINGTALK_WEBHOOK_URL`，或把上面几个任务的 `--deliver` 换成可用目标（weixin 侧还需你先给 bot 发条消息恢复 iLink 会话，见第二十轮）。
+- [ ] `62005b2c2091`（提醒：打电话问通达信交易账号设置）无 `next_run_at`，需确认是要重排还是一次性任务已过期。
+- [ ] `cb7bc4343e75` 已按 `repeat.times=12` 跑满自动退休；要复活需 `hermes cron resume` + 调 `repeat`。
+- [ ] `beeb41a12d4a` 的 pin 是否也撤（它现在指向 mimo，行为等同跟随主模型；撤掉即可恢复继承备用链）—— 那是你原先自己设的，故未动。
+- [ ] 两条验证会话 `20261001_132626_b6a08e`、`20261001_134716_691807` 可删。
+
+---
+
+
 ## 2026-10-01（第二十二轮）: 备用链改为单条 `deepseek-flash`，摘掉 `zai/glm-5.3-flash`
 
 ### 需求
