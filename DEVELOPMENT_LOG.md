@@ -4,6 +4,83 @@
 
 ---
 
+## 2026-10-01（第二十二轮）: 备用链改为单条 `deepseek-flash`，摘掉 `zai/glm-5.3-flash`
+
+### 需求
+
+`fallback_providers` 改成 deepseek-flash；`zai/glm-5.3-flash` 不再使用。
+
+### 改动前（7 个 home 完全一致）
+
+```yaml
+fallback_providers:
+  - provider: zai
+    model: glm-5.3-flash
+    base_url: https://api.z.ai/api/coding/paas/v4
+  - provider: deepseek
+    model: deepseek-v4-flash-vision-exp
+    base_url: https://api.deepseek.com/v1
+```
+
+### 先实测 DeepSeek 端点，确认该用哪个 model id
+
+```
+GET /v1/models -> 200，只有两个：
+  deepseek-flash       name="DeepSeek-V4.1-Flash"  ctx=1048576  out=393216  text+image  effort=low/high/max
+  deepseek-v4-pro      name="DeepSeek-V4-Pro"
+POST /v1/chat/completions model=deepseek-flash -> 200，content="ok"
+```
+
+**顺带查出一个隐藏问题**：配置里原有的 `deepseek-v4-flash-vision-exp` **不在** `/v1/models` 列表里；单独请求它虽然仍返回 200，但**响应里的 `model` 字段被服务端重写成 `deepseek-flash`** → 那是个**已废弃别名**，不是当前规范名。所以本轮把它换成 `deepseek-flash` 不只是"照要求改"，同时把备用链从别名挪到了正名。
+
+### 改动后（7 个 home 统一为单条）
+
+```yaml
+fallback_providers:
+  - provider: deepseek
+    model: deepseek-flash
+    base_url: https://api.deepseek.com/v1
+```
+
+（回退条目本身不带 `api_key`；密钥来自 `custom_providers[name=deepseek].api_key`，语义不变。落地方式同第二十一轮：`load_config`/`save_config`，**每个 home 一个独立进程**，脚本 `/tmp/mimo/set_fallback.py`。）
+
+### 验证
+
+1. **官方读取口径**：`hermes fallback list`
+   ```
+   Primary:   mimo-v2.6-pro  (via mimo)
+   Fallback chain (1 entry):
+     1. deepseek-flash  (via deepseek)  [https://api.deepseek.com/v1]
+   ```
+2. **逐 home**：7 个 home 的 `config get fallback_providers` 全部等于 `provider: deepseek / model: deepseek-flash / base_url: https://api.deepseek.com/v1`。
+3. **真实回退触发（E2E）**：故意用**已耗尽额度**的 zai 当主模型逼出回退 ——
+   ```
+   hermes chat -q 'Reply with exactly the single word: ok' --oneshot \
+       --provider zai -m glm-5.3-flash
+   ```
+   输出 / 日志：`⚠️ Model fallback: glm-5.3-flash via zai unavailable (billing or quota exhausted); using deepseek-flash via deepseek.` → 该 turn 由 **deepseek-flash** 服务并返回 `ok`（会话 `20261001_134716_691807`，5 秒）。
+   → **新链不只是配置正确，而是实测能接管回退**。
+
+### 残留的 zai（**未动**，供你决定）
+
+| 位置 | 内容 | 说明 |
+|---|---|---|
+| `~/.hermes/config.yaml` `providers.zai:` | `base_url: https://api.z.ai/api/coding/paas/v4`（无 key） | 已无任何引用；留着只是声明，行为不变 |
+| `.env` / `profiles/*/.env` | `GLM_API_KEY`、`GLM_BASE_URL` | ⚠️ 注意那是 **open.bigmodel.cn**（智谱国内站），与刚摘掉的 **api.z.ai**（coding-plan 站）**不是同一个端点**，不要混为一谈 |
+| `cron/jobs.json` 6 处 `zai` | 全是 `snapshot` 字段 | 属那 4 个 drift_skip 任务的历史记录，不是 pin |
+
+若要彻底清掉 zai，需删 `providers.zai` 块与 `GLM_*` 环境变量 —— **未自动执行**（删凭据不可逆，等你点头）。
+
+### 下次的注意点 / 待办
+
+- **回退条目只写 `provider`/`model`/`base_url`**；`api_key` 永远来自 `custom_providers[name=<provider>]`。
+- 备用链**只剩一条**：deepseek-flash 一旦不可用，就没有第二顺位了（原来 zai 是拿来兜 deepseek 的，但 zai 本身在第十七轮就已额度耗尽 —— 等于一直只有一条有效链，本轮只是把死掉的那条删掉）。
+- [ ] 4 个 cron 仍因 `snapshot=zai/glm-5.3` 被 drift_skip 拦着（`94fb71b0fbc8` / `e94615ca98a1` / `6de9d3a911e0` / `cb7bc4343e75`，承接第二十一轮）—— 现在 zai 已彻底弃用，这些 snapshot 更不可能自己刷新，**需要各自 `--pin` 才能复活**。
+- [ ] 两条验证会话 `20261001_132626_b6a08e`、`20261001_134716_691807` 可删。
+
+---
+
+
 ## 2026-10-01（第二十一轮）: 主力模型 qwen3.8 → MiMo（`mimo-v2.6-pro`），7 个 home 全量切换 + cron 解 pin
 
 ### 需求
