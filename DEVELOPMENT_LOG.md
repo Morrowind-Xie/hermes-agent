@@ -4,6 +4,68 @@
 
 ---
 
+## 2026-10-01（第二十轮）: 机器 12:43 重启 → 合并后的代码已自动上线并验证健康
+
+### 事件
+
+- `uptime` / `who -b` / journald 的 `-- Boot d676e5e0…` 三处一致：**本机在 12:43 重启过**（VM/WSL 级别）。
+- 重启把上一代网关（**pid 474**，09-30 23:47 启动）**非正常带走**，`gateway.lifecycle_ledger` 记：
+  `exited UNCLEANLY (no exit path ran — SIGKILL / OOM / VM death …)`，`last_heartbeat_at=2026-10-01T04:38:34Z`（= 12:38 CST），`suspected_oom=False`，`swap_used=4.3 GB`。
+  → 即 **VM 重启**，**不是**本轮操作里的任何 `pkill`（那些都发生在 10:2x，且模式只匹配 `git diff` / `less`）。
+- systemd 在重启后自动拉起：**gateway pid 476（12:43:17）**、**webui pid 478**，`NRestarts=0`、`SubState=running`。
+
+### 结果：第十九轮那步「需要重启才能生效」被这次重启代劳了
+
+`~/.hermes/logs/gateway.log` 12:44 的启动摘要（**运行的就是合并后的代码**）：
+
+```
+12:44:07 [Weixin] Connected account=f47343e3 base=https://ilinkai.weixin.qq.com
+12:44:07 [Dingtalk] Connected via Stream Mode
+12:44:09 ✓ weixin / api_server / webhook / dingtalk / qqbot connected
+12:44:10-15 ✓ dingtalk connected (profile: coding, exam, fitness, invest, music, work)
+12:44:16 Gateway running with 11 platform(s)
+12:44:16 Channel directory built: 4 target(s)
+12:44:18 Cron scheduler will tick 7 profile(s)
+12:44:23 kanban dispatcher: embedded in gateway
+```
+
+**关键验证点**：启动**没有**出现 `no dependency environment is committed for this install` → 11:55 的 `hermes pm install`（新环境 `41120b3452…` / 269 包）确实补齐了依赖层，R8 的坑这回没踩。`gateway_state.json` 亦为 `pid 476 / running / 7 profiles`。
+
+### 附带损失
+
+- **`/tmp` 被重启清空** → 第十九轮的回滚包 `/tmp/rb/20261001-103743` 和全部 `/tmp/sync4/*` 证据文件（pytest 全量输出、R5 脚本、triage 脚本）**都没了**。回滚包已按 R12 重建为 **`/tmp/rb/20261001-124719`**（7 份 `.env` + 7 份 `config.yaml` + `unit.service` + `gateway_state.json` + 两服务 `state.txt`）。第十九轮日志里的数字均来自当时实测，原样保留。
+
+### 重启后暴露的 3 个新观察（**均与本次合并无因果关系，需你决定**）
+
+1. **微信启动通知失败**（适配器本身 `Connected`，只是主动推送失败）：
+   `[Weixin] session expired for o9cq807-; retrying without context_token` → `iLink sendmessage session not ready: ret=-2 … the user must send the bot a message first (or re-pair)`。
+   → 需要你**给 bot 发一条消息**重建 iLink 会话（或重新配对）。
+2. **`session_reset.mode: both` 对 7 个 profile 全部失效** —— 这是**本次合并带进来的上游行为变更**：
+   `session_reset.mode: both is no longer applied: gateway conversations reset only on /new or /reset. To keep idle/daily resets, run hermes plugins install hermes-session-reset-policy.`
+   → 你原先配置的「空闲/每日自动重置会话」**现在不再生效**；要保留就装 `hermes-session-reset-policy`。
+3. **`tdx` MCP server 起不来**（7 个 profile 的 config 都指向同一路径）：
+   `command=/home/morrowind/hermes-agent/venv/bin/eltdx-mcp` → `missing executable`。实测 `venv/bin/eltdx-mcp` **不存在**（`venv` 是遗留的 3.12 环境，见 R13）。属**既有配置指向遗留 venv**，与本轮无关；要修需把该 MCP 的 `command` 改到可用解释器/入口。
+4. 另有一条 `gateway.shutdown_flush: Failed to recover pending message … FOREIGN KEY constraint failed` —— 上代非正常死亡的后果，**可能有 1 条待发消息丢失**。
+
+### 下次同步的注意点（追加）
+
+- **`~/.hermes/config.yaml` 会被 gateway 启动时重写**（本次 mtime 变成 12:43）——比对配置差异时以回滚包里的快照为准，别把重写当成人工改动。
+- 重启/上线后**只看 `gateway.log` 的 `Gateway running with N platform(s)` 与逐个 `✓ <platform> connected`**，不要用 `gateway list`（R9 假警报）。
+- 建议：既然 R12 的回滚包依赖 `/tmp`，而本机会因重启清空 `/tmp`，**下次把回滚包建在 `~/.hermes/rb/` 之类非 tmpfs 路径**。
+
+### 待办（承接第十九轮）
+
+- [x] ~~重启 gateway/webui 以加载合并后的代码~~ → **已由 12:43 的机器重启完成并验证**（11 platforms / 7 profiles 全连接）。
+- [ ] 给微信 bot 发一条消息以恢复 iLink 会话（第 1 项）。
+- [ ] 决定是否装 `hermes-session-reset-policy` 以保留 idle/daily 会话重置（第 2 项）。
+- [ ] 修 7 个 profile 里 `tdx` MCP 的 `command` 路径（第 3 项）。
+- [ ] 如需桌面端，跑 `npm run build --workspace apps/desktop`（本轮仍未跑）。
+- [ ] 遗留 `venv`(3.12) / `.venv`(3.11)：既会毒化 electron 的 PM-runtime fixture（R13），又让 `tdx` MCP 配置指向不存在的入口 —— 是否清除需你决定。
+- [ ] 第十八轮的 `sampleImageMsg` msgParam 键名（`mediaId` vs `photoURL`）仍待实网探测。
+
+---
+
+
 ## 2026-10-01（第十九轮）: 上游同步至 `eb8d21f482`（2545 → 0）—— 迄今最大一次，2 冲突，无回归
 
 ### 背景（数字）
