@@ -4,6 +4,116 @@
 
 ---
 
+## 2026-10-01（第十九轮）: 上游同步至 `eb8d21f482`（2545 → 0）—— 迄今最大一次，2 冲突，无回归
+
+### 背景（数字）
+
+| 项 | 值 |
+|---|---|
+| 上次同步落点 BASE | `9fc7f17906ea`（09-26，第三轮） |
+| 本次合并的上游 tip | `eb8d21f48214`（09-30 21:33 −0400）`fix(approval): give global-flag runs one parse in dangerous-command rules` |
+| 同步前 behind / ahead | **2545 / 104** |
+| 规模 | **3275 文件 / +261874 −60864** |
+| 合并提交 | **`85f049392a`** `Merge remote-tracking branch 'origin/main'` |
+| 最新稳定 tag | 仍是 `v2026.9.24`（已并入）→ 本轮属**用户主动发起**，非 tag 驱动 |
+
+上游速率（committer 日期）：09-24 **956** / 09-25 329 / 09-26 568 / 09-27 **874（峰）** / 09-28 595 / 09-29 416 / 09-30 **88** / 10-01 10 —— 大波已衰减到尾部（补丁尾、feat 密度极低），正是历史经验里最省力的窗口。热点目录（本波改动文件数）：`apps/desktop` 1030、`tests/hermes_cli` 251、`ui-tui/src` 123、`contributors/emails` 95、`tests/gateway` 87、`tests/agent` 87、`tests/tools` 84、**`.github/workflows` 51**、`plugins/platforms` 37、`web/src` 27。
+
+### 流程
+
+1. **预检**：`main == fork/main`、工作区干净；记下 **gateway PID 474**、**webui/dashboard PID 477**、**electron 未运行**。
+2. **回滚包（R12）**：`/tmp/rb/20261001-103743`（7 份 `.env` + 7 份 `config.yaml` + `unit.service` + `gateway_state.json` + `state.txt`；drop-in 已不存在，符合 R9 现状）。
+3. `git merge-tree` 预演 **2 冲突** → `git merge origin/main --no-edit` → 实跑**同样 2 冲突**，无意外。
+4. 解冲突 → R5 逐行存活校验 → R6 语义复核 → 全串行验证链 → 本日志 → 推送。
+
+### 冲突与取舍（2 个，都是 import 列表）
+
+| 文件 | 冲突内容 | 取舍 |
+|---|---|---|
+| `apps/desktop/electron/main.ts` | HEAD 有 `import { selectPoolEvictions } from './pool-eviction'`（fork 私有）+ 旧的 `pool-limits` 单行；上游把 `POOL_LIMITS_MIN` 加进同一个 import | **两侧都留**：保留 fork 的 `selectPoolEvictions` 行，同时把 `POOL_LIMITS_MIN` 并入 `pool-limits` 的 import（两者在文件中都确有使用：`selectPoolEvictions` 见 12291 行，`POOL_LIMITS_MIN.idleMs` 见 2018 行） |
+| `apps/desktop/src/store/gateway.ts` | HEAD 的 `notify` 在通知 import 里；上游加了 `SOURCE_SWITCH_DIAL_TIMEOUT_MS` 且**未**带 `notify` | **两侧都留**：`with-timeout` 采用上游的多行形式并加入 `SOURCE_SWITCH_DIAL_TIMEOUT_MS`；通知 import 补回 `notify`（该文件 951 行仍在用 `notify`，去掉即成死引用） |
+
+其余「两侧都改」的文件全部**自动合并**成功，逐个人工复核（R6）：
+
+- **`gateway/run_turn.py`**（fork +103/−3）：`_hmwa_post_turn_hooks(..., bridge_user_msg: str = "")` 与 2344 行调用点均在。**作用域**：`message_text` 在 2263 行赋值、2344 行使用，同一函数 `_handle_message_with_agent` 内且赋值在前 ✓。**判定前后语义**：2344 行拿到的 `response` 来自 2333 行 `_hmwa_shape_agent_response`（silence 判定已在此完成）→ 2339 行 prepend_reasoning → 2342 行 footer，即**判定后的值** ✓。
+- **`hermes_cli/main_desktop.py`**（fork +17/−1）：`env.setdefault("HERMES_DESKTOP_HERMES", str(launcher))`（1678 行）在位；`config_electron_flags` 仍同时进入 source 路径（1902）与打包路径（1910/2056）✓。
+- **`tests/hermes_cli/test_gui_command.py`**（fork +74）：`_prepare_source_launch_tree` + 2 个 electron_flags 测试都在 ✓。
+- **`agent/auxiliary_client.py`**（fork +13）：`reasoning_content` 剥离逻辑仍在 `_build_call_kwargs` 内 ✓。
+- **`apps/desktop/src/i18n/*`**（自动合并 7 文件）：**无重复键**（merged / upstream / 合并前 fork 三方同口径均为 0）✓；`src/i18n/` vitest 11 文件全过。
+- **新增重叠文件 `plugins/platforms/dingtalk/adapter.py`**：上游本波改了 **+4/−44** —— ① 新增 `from agent.i18n import t`，把 emoji 标签换成 `t("platform.dingtalk.emotion.*")`；② **删掉整个尾部 PLUGIN-COMPAT 块**（`EXT_MAP`/`_PLUGIN_COMPAT_LAZY`/`__getattr__`）。我们的 +147（`send_image_file`/`send_document`/`_upload_media`/`_send_file_message`）与它们**不同区域**，自动合并后：`t` 在 52 行 ✓、四个方法在 558/565/579/606 行 ✓、`_PLUGIN_COMPAT_LAZY` 命中 **0** ✓（上游的删除正确落地，符合 AGENTS.md「compat 指针树内禁用」）。
+
+
+### R5 逐行存活校验（不可省，已跑）
+
+```
+BASE=9fc7f17906ea  REF=7869a37b9b98
+files_with_private_changes=41
+added_lines_checked=1999
+files_deleted_in_merge=0
+missing_total=0
+```
+
+脚本 `/tmp/sync4/verify_private.py`（口径同历史模板：取 `git diff BASE..REF -- <file>` 的 `+` 行，跳过 `DEVELOPMENT_LOG.md`/`.gitignore`，逐行确认仍在合并后的文件里；`EXPECTED_REWRITES` 白名单**为空**——本轮无需刻意重写任何私有行）。
+
+### 验证结果（全串行，R3）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home；`tests/{hermes_cli,gateway,agent,tools,tui_gateway,plugins,cron}`） | **4631 文件 / 48149 passed / 11 failed / 559 skipped**（2384.6 s，-j 12） |
+| 2 | `uv lock --check`（PM 的 uv 0.12.3） | **rc=0**（`Resolved 334 packages`） |
+| 3 | **`hermes pm install`**（R8 必需；本波新增核心依赖 `browser-harness==0.1.13`） | 新依赖环境 **`41120b3452…`（609 MB / 269 包**，含 browser_harness）；`<repo>/.hermes/bin/hermes --version` **可跑**（不再报 `no dependency environment is committed`） |
+| 4 | `npm ci` | rc=0（**必须用 PM 托管 node v26.7.0 / npm 11.19.0**；系统 node 24.13.0 / npm **11.12.1 被 `engines` 拒绝** `EBADENGINE`）。postinstall 的 assistant-ui 渲染环补丁**已重新应用** ✓ |
+| 5 | typecheck | `apps/desktop` **rc=0**（4 套 tsconfig）、`ui-tui` **rc=0**、`web` **rc=0** |
+| 6 | **eslint**（R3 门槛：error 行数 = 0） | `apps/desktop src/ electron/ --quiet` **0 行**；`ui-tui` **0 行**；`web` **0 行** |
+| 7 | 定向 vitest | fork 私有 6 文件 **79 passed**；`src/store/` **165 文件全过**；`src/i18n/` **11 文件全过**；`electron/` **2961 passed / 2 failed（环境，见下）** |
+| 8 | web build | **rc=0**（`hermes_cli/web_dist`，3.77 s） |
+| 9 | ui-tui build | **rc=0**（`ui-tui/dist/entry.js`） |
+| 10 | 其他 | 冲突标记 **0**；R4 四个自有文件全在；assistant-ui 补丁已打；R7 探针 `('_handle_bridge_command', True) 44` **精确命中** |
+
+**未跑**：desktop（electron）打包 —— 本机 electron 未运行，`apps/desktop/dist` 在同步前就已是旧产物，且打包耗时很长；如需用桌面端请单独跑 `npm run build --workspace apps/desktop`。
+
+
+### 11 个 pytest 失败 + 1 超时的逐条定性（**均为既有/环境因素，无一为本轮引入**）
+
+| 失败 | 定性 | 证据 |
+|---|---|---|
+| `test_gateway_service.py::…test_managed_node_makes_system_unit_independent_of_callers_path` | **既有**（第十一轮日志已记录） | 本机 unit 的 `ExecStart` = `<repo>/.hermes/bin/hermes`（PM shim，R13/R9 有意为之）；本机 `11434`（Ollama）**实测 OPEN** |
+| `test_user_providers_model_switch.py` ×2 | **既有**（第十一轮日志已记录） | 同上：Ollama 在 11434 真实可达 → live discovery 走另一分支 |
+| `test_backup.py` / `test_kanban_core_functionality.py` / `test_process_heartbeat.py` | **FLAKY**（第十一轮日志已记录「3 个 FLAKY 文件」） | 重试即过（runner 标 `⚠ FLAKY`） |
+| `test_voice_mode.py::…test_wsl_without_pulse_blocks_voice`、`test_voice_wsl_pipewire.py::…`、`test_termux_api_detection.py::…` ×3 | **host = WSL** | `/proc/version` 含 microsoft、`/mnt/wslg` 存在、`/usr/lib/wsl/lib` 存在；失败输出即 `Running in WSL -- audio requires a forwarded sound server`。**且上游本波对 `tools/voice_mode.py` 的改动只是删尾部 PLUGIN-COMPAT 块（−58 全是 `__getattr__` 等）**，`detect_audio_environment` 逻辑未动 |
+| `test_openviking_provider.py::…port_is_open…`、`test_bot_desktop_browser.py::…requires_live_pid_and_open_port` | **端口状态/时序**（环境） | 断言「已关闭的端口仍被视作可连接」；纯本机 socket 状态 |
+| `test_web_keyless_fallback.py` ×2 | **测试环境缺可选 extra** | 输出为 `Parallel SDK not installed: … ['parallel-web'] …`；测试 env 的 site-packages 里 `parallel*` 计数 **0**。上游本波对 `plugins/web/*` 的 −204 全是删 PLUGIN-COMPAT 块，不可能装卸 SDK |
+| `test_bot_relay_windows_paths.py::test_local_delivery_resolves_sibling_hermes` | **上游本波的**行为变更 + 本机布局 | 上游把 `tools/bot_relay._hermes_cli()` 改为**优先返回 `<repo>/.hermes/bin/hermes`（published launcher）**；本机该文件**确实存在**（我们的 PM shim），而测试断言旧的「解释器同目录 sibling」。即：本机 `_hermes_cli()` 现在指向 PM shim（与 R13 一致），上游 CI 无该文件故不触发 |
+| `test_desktop_build_lock.py`（300 s 超时被 SIGKILL） | **并发负载** | 单独跑 **9 passed / 130.4 s**；12 并发下超过 300 s 文件超时 |
+| `electron/…source-backend.test.ts`、`backend-probes-runtime.test.ts`（vitest，2 个） | **遗留 venv（R13 已记录）** | 报错原文 `Using CPython 3.12.14 interpreter at: /home/morrowind/hermes-agent/venv/bin/python3` → `incompatible with … ==3.14.*`。本机实测 `venv`=3.12.14、`.venv`=3.11.14。三个相关文件**本波零改动** |
+
+→ **本轮无 Python/JS 回归**；失败面与第十一轮记录的既有基线一致，另加 WSL/端口/遗留 venv 三类环境因素。
+
+### 工作流修正（本机）
+
+`git` 在 harness 的 pty 下会调用 `less` 分页器，**未管道且未加 `--no-pager` 的 `git show` / `git diff` 会把终端挂死**（本轮实际发生 2 次，各耗 ~5–16 分钟；另有数次因连续 `sleep` 排队）。已写入本仓库 `.git/config`：`git config core.pager cat`（**只改本地仓库配置，不进版本库**）。后续所有 git 调用仍一律带 `--no-pager` 或重定向到文件。
+
+### 下次同步的注意点
+
+1. **新的起算点**：下次 `BASE` = `eb8d21f48214`（本轮合并的上游 tip），而非 `9fc7f17906`。
+2. **R6 重叠清单新增一项**：`plugins/platforms/dingtalk/adapter.py`（我们 +147 / 上游 −44）。上游正在活跃改这个文件，下轮必须复核 `t()` import 与 PLUGIN-COMPAT 块。
+3. **`.github/workflows` 本波变了 51 个文件**（runner 规格、actions 版本、`HERMES_TEST_WORKERS` 调整）—— 若以后要动 CI 车道，先看这一波。
+4. **依赖层**：本波只增了 `browser-harness==0.1.13`（核心）+ `lucide-react`（desktop）；`uv lock --check` rc=0 故无需 `hermes pm lock`，但**每次上游改 `pyproject.toml` 都必须补 `hermes pm install`**，否则 PM 启动路径全挂（R8）。
+5. **npm 必须用 PM 托管 node**：系统 npm 11.12.1 落在 `engines` 禁止区间（`<11.10.0 || >=11.17.0`）；把 `/home/morrowind/.hermes/tools/node-26.7.0-linux-x64/bin` 前置 PATH（其 npm 11.19.0）。
+6. **稳定 tag 与大规模堆积**：本轮是**用户主动发起**（最新稳定 tag `v2026.9.24` 早已并入）。R1 只看 tag 的提示条件会让 2545 提交 / 3275 文件的堆积**静默发生 5 天**——是否给 R1 加「规模触发」待用户决定。
+
+### 待办
+
+- [ ] **重启 gateway / webui 以加载合并后的代码**（当前 PID 474 跑的是合并**前**已载入内存的旧代码）。**未自动执行的原因**：gateway 承载用户正在使用的微信/钉钉/企微通道（R11 红线），重启会短暂中断；需用户明确同意。重启前依赖环境已就绪（验证链第 3 项），不会触发 R8 那种崩溃循环。
+- [ ] 如需桌面端，跑 `npm run build --workspace apps/desktop`（本轮未跑）。
+- [ ] 第十一轮起的既有失败（4 个 + 3 个 flaky）仍未修；根因已记录，属本机环境。
+- [ ] 遗留 `venv`(3.12) / `.venv`(3.11) 会被 electron 的 PM-runtime fixture 选中（R13）。是否 `rm -rf` 需用户决定（它们也是 R9 的回滚材料之一）。
+- [ ] 第十八轮的 `sampleImageMsg` msgParam 键名（`mediaId` vs `photoURL`）仍待实网探测。
+- [ ] `tools/bot_relay._hermes_cli()` 在本机现在返回 `<repo>/.hermes/bin/hermes`（上游新行为 + 我们的 PM shim）——与 R13 一致，但值得在真实 relay 场景确认一次。
+
+---
+
+
 ## 2026-10-01（第十八轮）: 钉钉补上本地上传（`send_image_file` / `send_document`）—— 静态验证通过，**实网未验证**
 
 ### 背景
