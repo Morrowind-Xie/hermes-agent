@@ -59,9 +59,7 @@ describe('blob preview URL ownership handoff', () => {
     // Mirrors use-composer-submit: clone → clear({ retainPreviewUrls }) → dispatch clone.
     const revokeObjectURL = stubRevokeObjectURL()
     const blobUrl = 'blob:hermes-direct-submit-1'
-    addComposerAttachment(
-      attachment({ id: 'image:drop', kind: 'image', label: 'Lattice.png', previewUrl: blobUrl })
-    )
+    addComposerAttachment(attachment({ id: 'image:drop', kind: 'image', label: 'Lattice.png', previewUrl: blobUrl }))
 
     const submittedAttachments = $composerAttachments.get().map(item => ({ ...item }))
     mainComposerScope.clear({ retainPreviewUrls: true })
@@ -284,6 +282,14 @@ describe('session drafts', () => {
     expect(takeSessionDraft(null).text).toBe('new chat draft')
     expect(takeSessionDraft(undefined).text).toBe('new chat draft')
     expect(takeSessionDraft('session-a').text).toBe('session draft')
+  })
+
+  it('keeps separate fresh-chat lifecycle drafts isolated', () => {
+    stashSessionDraft('__new__:first', 'first unsent chat', [])
+    stashSessionDraft('__new__:second', 'second unsent chat', [])
+
+    expect(takeSessionDraft('__new__:first').text).toBe('first unsent chat')
+    expect(takeSessionDraft('__new__:second').text).toBe('second unsent chat')
   })
 
   it('persists draft text (not attachments) to localStorage', () => {

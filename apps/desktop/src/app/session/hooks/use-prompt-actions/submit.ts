@@ -3,7 +3,7 @@ import { type MutableRefObject, useCallback } from 'react'
 
 import { PROMPT_SUBMIT_REQUEST_TIMEOUT_MS } from '@/hermes'
 import type { Translations } from '@/i18n'
-import { type ChatMessage, textPart } from '@/lib/chat-messages'
+import { type ChatMessage, finalizeInterruptedMessages, textPart } from '@/lib/chat-messages'
 import { optimisticAttachmentRef } from '@/lib/chat-runtime'
 import { sanitizeComposerInput } from '@/lib/composer-input-sanitize'
 import { setMutableRef } from '@/lib/mutable-ref'
@@ -21,6 +21,7 @@ import {
   revokeDiscardedAttachmentPreviews,
   terminalContextBlocksFromDraft
 } from '@/store/composer'
+import { noteMessageSent } from '@/store/desktop-metrics'
 import { $hudMode } from '@/store/hud'
 import { clearNotifications, notify, notifyError } from '@/store/notifications'
 import { consumePendingCredentialWarning, requestDesktopOnboarding } from '@/store/onboarding'
@@ -35,15 +36,18 @@ import {
   setMessages,
   touchSessionActivity
 } from '@/store/session'
-import { $sessionStates } from '@/store/session-states'
+import { $sessionStates, $sessionTiles } from '@/store/session-states'
 import type { SessionInfo } from '@/types/hermes'
 
-import { profileScopeForTranscriptSession, resolveActiveTranscriptSession } from '../../../contrib/hooks/use-background-sync'
+import {
+  profileScopeForTranscriptSession,
+  resolveActiveTranscriptSession
+} from '../../../contrib/hooks/use-background-sync'
 import type { ClientSessionState } from '../../../types'
-import { sessionContextDrift } from '../session-context-drift'
+import { routeTargetFromToken, sessionContextDrift } from '../session-context-drift'
+import type { CreateBackendSessionForSend } from '../use-session-actions/create-overrides'
 import { resolveSessionProfile } from '../use-session-actions/utils'
 
-import { finalizeInterruptedMessages } from './rewind'
 import { registerRecoveredRuntime, singleFlightSessionResume, takeRecoveredRuntime } from './single-flight-resume'
 import {
   acquireSubmitInFlight,
@@ -64,7 +68,7 @@ interface SubmitPromptDeps {
   activeSessionIdRef: MutableRefObject<string | null>
   busyRef: MutableRefObject<boolean>
   copy: Translations['desktop']
-  createBackendSessionForSend: (preview?: string | null) => Promise<string | null>
+  createBackendSessionForSend: CreateBackendSessionForSend
   getRoutedStoredSessionId: () => null | string
   getRuntimeIdForStoredSession: (storedSessionId: string) => null | string
   getRouteToken: () => string
@@ -434,7 +438,6 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         }
       }
 
-
       // Idempotent optimistic insert — re-running with the resolved sessionId
       // after createBackendSessionForSend just overwrites with the same id.
       const seedOptimistic = (sid: string) => {
@@ -508,6 +511,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
         // unless a rejected-submit restore already re-loaded the attachments
         // into the composer, which re-owns those URLs (#63682 handoff).
         revokeDiscardedAttachmentPreviews(attachments, usingComposerAttachments ? $composerAttachments.get() : [])
+
         if (!sid) {
           if (targetIsCurrentView()) {
             scope.setMessages(current => current.filter(m => m.id !== optimisticId))
@@ -728,7 +732,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
       if (!sessionId) {
         try {
-          sessionId = await createBackendSessionForSend(bubbleText)
+          sessionId = await createBackendSessionForSend(bubbleText, undefined, {
+            onComposerScopeAssigned: options?.onComposerScopeAssigned
+          })
         } catch (err) {
           dropOptimistic(null)
           releaseBusy()
@@ -762,16 +768,28 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
           return false
         }
 
-        // A successful create re-homes selection + route to the chat it just
-        // minted, so the pre-create baseline can't tell our own re-home from
-        // a user switch (judging it drift aborted EVERY first send of a new
-        // chat: no prompt.submit, no DB row, a stranded route that 404s
-        // "Session not found"). The drift signal for this window is the
-        // active ref instead: every switch path re-nulls or retargets it
-        // synchronously, so it only still equals the id create returned when
-        // nobody re-homed since.
+        // A successful create re-homes selection and route onto the chat it
+        // just minted. A background stream can still retarget the active
+        // runtime ref during that window (#47709). That ref mismatch is not
+        // a user switch when the route, selection, and stored→runtime map
+        // still name this create. A real switch moves route and selection
+        // onto a different chat, and that path still aborts.
         if (activeSessionIdRef.current !== sessionId) {
-          return abortForSessionSwitch(sessionId)
+          // A background stream retargets only the active runtime (#47709).
+          // Route and selection still name the chat create just minted, and
+          // that stored id still maps to this runtime. That is not a user
+          // switch. A real switch moves the route and selection onto a chat
+          // whose runtime is not the id create returned.
+          const selection = selectedStoredSessionIdRef.current
+          const mapped = selection ? getRuntimeIdForStoredSession(selection) : null
+          const routeTarget = routeTargetFromToken(getRouteToken())
+          const routeAgrees = routeTarget === null || routeTarget === '__new__' || routeTarget === selection
+
+          if (mapped === sessionId && routeAgrees) {
+            activeSessionIdRef.current = sessionId
+          } else {
+            return abortForSessionSwitch(sessionId)
+          }
         }
 
         // Re-pin the baseline to the created chat for the rest of the
@@ -834,9 +852,7 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
           const refreshed = await refreshIfTranscriptStale(guardStoredId, localSnapshot.messages, {
             excludeMessageId: optimisticId,
-            profile: profileScopeForTranscriptSession(
-              resolveActiveTranscriptSession(guardStoredId, liveSessionId)
-            )
+            profile: profileScopeForTranscriptSession(resolveActiveTranscriptSession(guardStoredId, liveSessionId))
           })
 
           if (sessionDriftReason()) {
@@ -904,6 +920,9 @@ export function useSubmitPrompt(deps: SubmitPromptDeps) {
 
         try {
           const recoverStoredSessionId = targetStoredSessionId ?? selectedStoredSessionIdRef.current
+
+          // A bot's chat is a tile scoped to the `bots` workspace; the primary chat is Sessions mode.
+          noteMessageSent($sessionTiles.get().find(tile => tile.runtimeId === sessionId)?.workspaceMode ?? 'sessions')
 
           const submitted = await withSessionNotFoundResume(
             sessionId,
