@@ -1299,6 +1299,96 @@ def test_gui_source_launch_stays_clean_without_configured_flags(tmp_path, monkey
     assert calls == [[str(executable), "."]]
 
 
+# --- desktop IME env completion (linux) -----------------------------------
+# Regression for the recurring "CJK input works in every other window, not in
+# Hermes" report: a menu/.desktop launch drops the session's *_IM_MODULE
+# exports (they live past .bashrc's interactive-only guard), and the launcher
+# must reconstruct them from the installed toolkit frontend. Diagnosed
+# 2026-09-20; the [ime] desktop.log line goes silent in exactly this shape.
+
+
+def _fake_readdir(table: dict):
+    def readdir(path: str) -> list:
+        if path in table:
+            return table[path]
+        raise FileNotFoundError(path)
+    return readdir
+
+
+def _clear_im_env(monkeypatch):
+    for var in main_desktop._IM_ENV_VARS:
+        monkeypatch.delenv(var, raising=False)
+
+
+def test_detect_linux_im_framework_names_the_single_installed_frontend():
+    fcitx_only = _fake_readdir({
+        "/usr/lib": ["x86_64-linux-gnu"],
+        "/usr/lib/x86_64-linux-gnu": ["gtk-3.0"],
+        "/usr/lib/x86_64-linux-gnu/gtk-3.0": ["3.0.0"],
+        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules": ["im-fcitx5.so"],
+    })
+    assert main_desktop._detect_linux_im_framework(readdir=fcitx_only) == "fcitx"
+
+    ibus_only = _fake_readdir({
+        "/usr/lib64": ["gtk-4.0"],
+        "/usr/lib64/gtk-4.0": ["4.0.0"],
+        "/usr/lib64/gtk-4.0/4.0.0/immodules": ["im-ibus.so"],
+    })
+    assert main_desktop._detect_linux_im_framework(readdir=ibus_only) == "ibus"
+
+
+def test_detect_linux_im_framework_stays_silent_on_none_or_several():
+    """No frontend installed, or several (a machine mid-migration): never guess."""
+    assert main_desktop._detect_linux_im_framework(readdir=_fake_readdir({})) is None
+
+    both = _fake_readdir({
+        "/usr/lib": ["x86_64-linux-gnu"],
+        "/usr/lib/x86_64-linux-gnu": ["gtk-3.0"],
+        "/usr/lib/x86_64-linux-gnu/gtk-3.0": ["3.0.0"],
+        "/usr/lib/x86_64-linux-gnu/gtk-3.0/3.0.0/immodules": ["im-fcitx5.so", "im-ibus.so"],
+    })
+    assert main_desktop._detect_linux_im_framework(readdir=both) is None
+
+
+@pytest.mark.platforms("linux")
+def test_desktop_launch_env_completes_im_env_for_menu_launch(monkeypatch, tmp_path):
+    """No session exports → the installed frontend's five vars reach Electron."""
+    _clear_im_env(monkeypatch)
+    monkeypatch.setattr(main_desktop, "_detect_linux_im_framework", lambda readdir=None: "fcitx")
+    monkeypatch.setattr(main_desktop, "_desktop_launch_options", lambda: ([], "auto", "auto", "auto", True))
+    monkeypatch.setattr(main_desktop, "_detect_linux_password_store", lambda: None)
+    monkeypatch.setattr(main_desktop, "_prefer_wsl_d3d12", lambda env: None)
+
+    env, _flags = main_desktop._desktop_launch_env(argparse.Namespace(cwd=str(tmp_path)))
+
+    assert env["INPUT_METHOD"] == "fcitx"
+    assert env["GTK_IM_MODULE"] == "fcitx"
+    assert env["QT_IM_MODULE"] == "fcitx"
+    assert env["SDL_IM_MODULE"] == "fcitx"
+    assert env["XMODIFIERS"] == "@im=fcitx"
+
+
+@pytest.mark.platforms("linux")
+def test_desktop_launch_env_keeps_session_im_choice_without_probing(monkeypatch, tmp_path):
+    """One session export already routes input; we neither override nor probe."""
+    _clear_im_env(monkeypatch)
+    monkeypatch.setenv("GTK_IM_MODULE", "ibus")
+
+    def _must_not_probe(readdir=None):
+        raise AssertionError("a session-configured input method must not be probed")
+
+    monkeypatch.setattr(main_desktop, "_detect_linux_im_framework", _must_not_probe)
+    monkeypatch.setattr(main_desktop, "_desktop_launch_options", lambda: ([], "auto", "auto", "auto", True))
+    monkeypatch.setattr(main_desktop, "_detect_linux_password_store", lambda: None)
+    monkeypatch.setattr(main_desktop, "_prefer_wsl_d3d12", lambda env: None)
+
+    env, _flags = main_desktop._desktop_launch_env(argparse.Namespace(cwd=str(tmp_path)))
+
+    assert env["GTK_IM_MODULE"] == "ibus"
+    assert "XMODIFIERS" not in env
+    assert "INPUT_METHOD" not in env
+
+
 # --- desktop.password_store detection & bridging (linux) ------------------
 
 

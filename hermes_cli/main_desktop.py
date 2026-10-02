@@ -1408,6 +1408,85 @@ def _detect_linux_password_store() -> str | None:
     return None
 
 
+_GTK_LIB_ROOTS = ("/usr/lib", "/usr/lib64", "/lib", "/usr/local/lib")
+# Debian-style multiarch prefixes under a lib root (`x86_64-linux-gnu`, …) —
+# that, not `/usr/lib/gtk-3.0`, is where GTK's immodules really live.
+_MULTIARCH_SEGMENT = re.compile(r"^[a-z0-9_]+-linux(?:-|$)")
+_IM_ENV_VARS = ("INPUT_METHOD", "GTK_IM_MODULE", "QT_IM_MODULE", "XMODIFIERS", "SDL_IM_MODULE")
+# Any one of these set means the session already chose an input-method route.
+_IM_SESSION_KEYS = ("GTK_IM_MODULE", "QT_IM_MODULE", "XMODIFIERS")
+
+
+def _gtk_im_module_dirs(readdir: Callable[[str], list[str]]) -> list[str]:
+    """Every ``immodules`` directory GTK could load a client module from."""
+    roots = set(_GTK_LIB_ROOTS)
+    for base in _GTK_LIB_ROOTS:
+        try:
+            entries = readdir(base)
+        except OSError:
+            continue
+        for entry in entries:
+            if _MULTIARCH_SEGMENT.match(entry):
+                roots.add(f"{base}/{entry}")
+    dirs: list[str] = []
+    for root in roots:
+        for gtk in ("gtk-3.0", "gtk-4.0"):
+            try:
+                versions = readdir(f"{root}/{gtk}")
+            except OSError:
+                continue
+            for version in versions:
+                dirs.append(f"{root}/{gtk}/{version}/immodules")
+    return dirs
+
+
+def _detect_linux_im_framework(readdir: Optional[Callable[[str], list[str]]] = None) -> Optional[str]:
+    """Input-method framework installed for this machine's GTK toolkits ("fcitx"/"ibus"), or None.
+
+    Chromium under a menu/.desktop launcher inherits none of the session's
+    ``*_IM_MODULE`` exports (on this class of setup they live past ``.bashrc``'s
+    interactive-only guard) and then drops CJK input in this app alone. Pick the
+    framework from the toolkits' immodule directories — the same facts Electron's
+    ``describeLinuxInputMethod`` reports in ``desktop.log``. Exactly one framework
+    installed earns the answer; none, or several (a machine mid-migration), stays
+    None so a guess never overrides the session's own choice. Pure apart from the
+    injected directory reader, so unit tests never touch the real filesystem."""
+    listdir = readdir or os.listdir
+    found: set[str] = set()
+    for dirpath in _gtk_im_module_dirs(listdir):
+        try:
+            files = listdir(dirpath)
+        except OSError:
+            continue
+        for name in files:
+            if not name.endswith(".so"):
+                continue
+            if name.startswith("im-fcitx"):
+                found.add("fcitx")
+            elif name.startswith("im-ibus"):
+                found.add("ibus")
+    return found.pop() if len(found) == 1 else None
+
+
+def _complete_linux_im_env(env: dict) -> None:
+    """Fill the input-method variables a menu-launched Electron never receives.
+
+    Mirrors the session's standard export set (fcitx/ibus docs agree on these
+    five), valued from the toolkit frontend actually installed. Never overrides:
+    if the session configured an input-method route we keep our hands off it
+    entirely and do not even probe."""
+    if any(env.get(key) for key in _IM_SESSION_KEYS):
+        return
+    framework = _detect_linux_im_framework()
+    if not framework:
+        return
+    env.setdefault("INPUT_METHOD", framework)
+    env.setdefault("GTK_IM_MODULE", framework)
+    env.setdefault("QT_IM_MODULE", framework)
+    env.setdefault("XMODIFIERS", f"@im={framework}")
+    env.setdefault("SDL_IM_MODULE", framework)
+
+
 _A11Y_OFF_WORDS = frozenset(("0", "false", "no", "off", "disabled"))
 
 
@@ -1665,6 +1744,13 @@ def _desktop_launch_env(args: argparse.Namespace) -> tuple[dict, list[str]]:
         )
         if password_store:
             env["HERMES_DESKTOP_PASSWORD_STORE"] = password_store
+
+    # Same launcher-env gap as password-store, for the IME: a menu/.desktop
+    # launch drops the session's input-method exports, and Chromium then keeps
+    # every CJK keystroke out of this app alone (#93528 family, re-diagnosed
+    # 2026-09-20). Complete the missing vars from the installed toolkit frontend.
+    if sys.platform == "linux":
+        _complete_linux_im_env(env)
 
     # PM-managed installs: point Desktop at the PM launcher instead of letting it
     # build a source-python backend. hermes_bootstrap injects the committed

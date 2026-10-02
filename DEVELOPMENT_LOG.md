@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-10-01（第二十四轮）: desktop 中文输入第三次失效——launcher env 缺 IME 变量 + fcitx5 双实例互踢，双修
+
+### 背景（症状与实证数字）
+
+用户报「desktop 的中文输入**又**不好用了」。三层实证：
+
+1. **Electron 拿不到 IME 变量**（与 09-20 同指纹）：`desktop.log` 今天 14:18:13 与 14:50:37 两次启动**均无 `[ime]` 行**（对比 09-20/09-24/09-26 的 5 次 shell 启动都有）→ `describeLinuxInputMethod` 沉默 = `GTK_IM_MODULE`/`QT_IM_MODULE`/`XMODIFIERS` 全缺且 locale 非 zh*。根因照旧：这三个 export 在 `~/.bashrc` **第 8 行 `case $-` 交互早退之后**，应用网格（`.desktop`，`Terminal=false`）启动链读不到。
+2. **fcitx5 不保活**（09-20 未发现的第二层）：实测今天 14:52:00 起的实例几分钟内死亡；`.bashrc` 自启块（`if [ -n "$DISPLAY" ] && ! pgrep -x fcitx5; …`）的 pgrep 检查在多 shell 并发下非原子 → 双实例抢 DBus 名（journal 实录 `Failed to create addon: dbus Unable to request dbus name. Is there another fcitx already running?`）→ 互踢。15:13 装 unit 时的 `NRestarts=6` 全是这个。
+3. `.desktop` **是生成物**：`_register_linux_desktop_entry(defer=launched_from_shell() and not build_only)` —— 从应用网格启动会**立刻重写** `hermes.desktop`，手写 `Exec=env …` 快照会被抹掉（09-20 遗留的"写进 .desktop"方向实为死循环）；`~/.config/environment.d/` 只进 systemd user manager 环境，WSLg 的启动链（Windows 开始菜单 → `/init`）不经过它。落点只能在 `hermes desktop` 的 Electron spawn env。
+
+### 流程与修复
+
+1. **`hermes_cli/main_desktop.py`**（主修）：新增 `_detect_linux_im_framework()`（扫 GTK immodules 目录找 `im-fcitx*.so`/`im-ibus*.so`，与 Electron 侧 `describeLinuxInputMethod` 同判据；注入式 readdir 纯函数；**恰好一个**前端装着才给答案，0 个或多个 = None 不猜）+ `_gtk_im_module_dirs()` + `_complete_linux_im_env()`（补 `INPUT_METHOD`/`GTK_IM_MODULE`/`QT_IM_MODULE`/`XMODIFIERS`/`SDL_IM_MODULE` 五个，与 `.bashrc` export 集一致；会话已配置任一 `_IM_SESSION_KEYS` 则完全不碰、连探测都不做）。`_desktop_launch_env()` 在 password-store 块后接线 —— 同为 launcher 环境缺口的补全（`_detect_linux_password_store` docstring 早有先例："Chromium's own detection fails under the launcher env"）。
+2. **`tests/hermes_cli/test_gui_command.py`**：+4 用例 = 2 纯函数（跨平台，fake readdir）+ 2 `@pytest.mark.platforms("linux")` 集成（后者含"会话已配置则不探测"的 `AssertionError` 探针）。
+3. **fcitx5 收编 systemd user unit**：`~/.config/systemd/user/fcitx5.service`（`Environment=DISPLAY=:0` + `--disable wayland` + `Restart=always`/`RestartSec=3`/`StartLimitBurst=5`）；`.bashrc` 自启块改为注释指向 unit（原文保留）。单实例所有权 + journal 可查死因（老方式 stderr 全进 `/dev/null`，这就是 09-20 查不到它死因的原因）。回滚包 `/tmp/rb/20261001-151311/`（bashrc + systemd-user 全目录）。
+
+### 验证
+
+- `scripts/run_tests.sh tests/hermes_cli/test_gui_command.py tests/hermes_cli/test_desktop_wsl_gpu.py` → **77 passed / 0 failed / 20 skipped**（skip = macos/windows lane marker，预期）
+- 补跑引用 `_desktop_launch_env` 的其余文件：`test_desktop_source_build`(3✓) / `test_desktop_startup_cost`(1✓) / `test_bundled_desktop_launch`(20✓) 全绿；`test_desktop_build_lock.py` **391s 超时（既有失败，见待办）**，对照实证：stash 本波改动后同一文件**同样 7 点后卡死超时**（两次均 `.......` 后挂在 `test_gui_releases_lock_after_build_failure`）→ 与本次改动无关
+- **端到端（真启动）**：`env -u INPUT_METHOD -u GTK_IM_MODULE -u QT_IM_MODULE -u XMODIFIERS -u SDL_IM_MODULE setsid ./.hermes/bin/hermes desktop --skip-build` 模拟应用网格 → `desktop.log` 15:14:21 `[ime] ozone=x11 DISPLAY=:0 WAYLAND_DISPLAY=wayland-0 im-module=fcitx session-dbus=yes gtk-im-modules=fcitx(gtk3)`（修复前 14:18/14:50 同条件两次均沉默）；冒烟后已清理（0 残留进程/窗口）
+- fcitx5：`ActiveState=active SubState=running MainPID=593522 NRestarts=0`（unit 独占后稳定）
+
+### 下次注意点
+
+1. **中文输入三层判据**（下次直接按此查，勿重复诊断）：`systemctl --user show fcitx5 -p ActiveState`（daemon 活着没）→ `desktop.log` 的 `[ime]` 行（Electron 拿到 im-module 没；沉默 = 变量又丢了）→ 行内 `gtk-im-modules=fcitx(gtk3)`（模块装着没）。三层任一断，症状相同。
+2. `_desktop_launch_env` 现在是 fork 私有补丁热点（`HERMES_DESKTOP_HERMES` + IME 补齐两块），同步后按 R5 逐行核对；`_complete_linux_im_env`/`_detect_linux_im_framework` 紧邻 `_detect_linux_password_store`，上游若重构该区按并集处理。
+3. fcitx5 日志在 `journalctl --user -u fcitx5`；`.bashrc` 的 5 个 export 保留（shell 内应用仍需要），只有自启块被收编。
+
+### 待办
+
+1. **用户实测中文输入**（我无法输入 CJK 验证候选框）。若仍失效：查 `journalctl --user -u fcitx5 | grep xcb` 与 `[ime]` 行的 DISPLAY 是否一致、`fcitx5-remote` 是否响应。
+2. **`test_desktop_build_lock.py` 既有卡死未修**（第 8 个 `test_gui_releases_lock_after_build_failure`，7 过后 391s 超时 SIGKILL；改动前后对照一致）。疑点：该测试未 mock `_register_linux_desktop_entry`（`build_only=True` → `defer=False` → 真跑 `install_desktop_entry`/`refresh_desktop_databases`）且此文件无 `test_gui_command.py` 那个 `_isolate_xdg_data_home` autouse fixture。未深挖——不在本波职责内，标记为 fork 既有失败。
+
+---
+
 ## 2026-10-01（第二十三轮）: 澄清 cron「drift_skip」——机制**已不存在**，并撤回上一轮的错误处置
 
 ### 问题
