@@ -453,6 +453,8 @@
     "boot.errors.gatewaySignInRequired",
     "boot.errors.gatewaySignInRequiredDetail",
     "boot.errors.ipcBridgeUnavailable",
+    "boot.errors.localBackendPoolSaturated",
+    "boot.errors.localBackendPoolSaturatedDetail",
     "boot.errors.openLogs",
     "boot.errors.reconnectNow",
     "boot.errors.restartHermes",
