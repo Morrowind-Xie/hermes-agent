@@ -4,7 +4,7 @@ provider="custom" (Ollama, vLLM, llama.cpp, GLM-5.2 on ARK, …)."""
 from typing import Any
 from urllib.parse import urlparse
 
-from agent.reasoning_effort import OPENAI_COMPAT_WIRE_EFFORTS, clamp_effort
+from agent.reasoning_effort import OPENAI_COMPAT_WIRE_EFFORTS, XIAOMI_MIMO_EFFORTS, clamp_effort
 from providers import register_provider
 from providers.base import ProviderProfile
 from utils import base_url_host_matches
@@ -25,6 +25,26 @@ def _looks_like_ollama_endpoint(base_url: str | None) -> bool:
         return False
     host = (parsed.hostname or "").lower().rstrip(".")
     return bool(host) and (host == "ollama.com" or host.endswith(".ollama.com") or "ollama" in host.split("."))
+
+
+def _wire_efforts_for(base_url: str | None) -> tuple[str, ...]:
+    """Reasoning-effort vocabulary of the endpoint behind this custom route.
+
+    A custom endpoint's vocabulary is normally undiscoverable, so the widest OpenAI-compat
+    set is the honest ceiling — but hosts with a KNOWN stricter contract must clamp onto
+    that contract instead, or the wider ladder ships a level the endpoint 400s on and the
+    session silently falls back to the next provider (#126509: Xiaomi MiMo accepts only
+    ``none``/``low``/``medium``/``high`` and rejects ``max``/``minimal``/``xhigh`` with
+    HTTP 400 "Invalid request parameters").
+    """
+    raw = (base_url or "").strip()
+    if not raw:
+        return OPENAI_COMPAT_WIRE_EFFORTS
+    parsed = urlparse(raw if "://" in raw else f"//{raw}")
+    host = (parsed.hostname or "").lower().rstrip(".")
+    if host.endswith("xiaomimimo.com"):
+        return XIAOMI_MIMO_EFFORTS
+    return OPENAI_COMPAT_WIRE_EFFORTS
 
 
 class CustomProfile(ProviderProfile):
@@ -69,7 +89,8 @@ class CustomProfile(ProviderProfile):
         # effort arrives here already filled by default_reasoning_config). Never emit
         # think=True (Ollama-only flag).
         if reasoning_config and isinstance(reasoning_config, dict):
-            effort = (reasoning_config.get("effort") or "").strip().lower()
+            # str(): a bool/int effort (YAML oddities) must never reach .strip() nor the wire.
+            effort = str(reasoning_config.get("effort") or "").strip().lower()
             if effort == "none" or reasoning_config.get("enabled", True) is False:
                 # See #14820.
                 top_level["reasoning_effort"] = "none"
@@ -80,7 +101,13 @@ class CustomProfile(ProviderProfile):
                 # "none" / "default"; any graded level ("medium", "high") 400s (#75089).
                 top_level["reasoning_effort"] = "default"
             elif effort:
-                top_level["reasoning_effort"] = clamp_effort(effort, OPENAI_COMPAT_WIRE_EFFORTS)
+                wire_efforts = _wire_efforts_for(ctx.get("base_url"))
+                clamped = clamp_effort(effort, wire_efforts)
+                # A bespoke/unknown name passes through clamp_effort by design (custom relays
+                # use their own tiers); the wire only gets values the endpoint declared, so
+                # anything outside its vocabulary is dropped rather than shipped (#126509).
+                if clamped in wire_efforts:
+                    top_level["reasoning_effort"] = clamped
         return extra_body, top_level
 
     def fetch_models(

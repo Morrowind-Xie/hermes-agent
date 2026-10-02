@@ -27,6 +27,13 @@ EFFORT_LADDER: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "x
 #: Widest OpenAI-compatible wire vocabulary (OpenRouter, Nous Portal).
 OPENAI_COMPAT_WIRE_EFFORTS: tuple[str, ...] = ("none", "minimal", "low", "medium", "high", "xhigh", "max")
 
+#: Xiaomi MiMo wire vocabulary (live-verified 2026-10-01 against token-plan-cn.xiaomimimo.com).
+#: ONLY lowercase ``none``/``low``/``medium``/``high`` are accepted — ``minimal``/``xhigh``/``max``/
+#: ``ultra``, any case variant ("High"), a bool, ``""``, ``0`` or a dict are all rejected with
+#: HTTP 400 "Invalid request parameters" (no ``param`` named), which Hermes reads as an
+#: unretryable BadRequest and answers by silently falling back to the next fallback provider.
+XIAOMI_MIMO_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high")
+
 #: OpenAI/Codex Responses per model generation (live-verified): ``minimal`` is rejected by
 #: both (clamps to low); ``max`` is gpt-5.6 / gpt-6-tier only (legacy = 5.5 and older).
 CODEX_GPT56_EFFORTS: tuple[str, ...] = ("none", "low", "medium", "high", "xhigh", "max")

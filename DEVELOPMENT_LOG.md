@@ -4,6 +4,42 @@
 
 ---
 
+## 2026-10-01（第二十五轮）: MiMo 的 reasoning_effort 是 4 值枚举——per-host 钳制，堵住「400 → 静默 fallback」
+
+### 背景（症状与实证数字）
+
+round 21/22 把主模型切到 MiMo 后的连锁问题：请求间歇性「自己换了模型」。三层实证：
+
+1. **live probe 2026-10-01**（token-plan-cn.xiaomimimo.com，mimo-v2.6-pro）：`reasoning_effort` **只接受小写 `none`/`low`/`medium`/`high` 四值**。`minimal`/`xhigh`/`max`/`ultra`/`default`、任何大小写变体（`High`）、bool、`""`、`0`、`{"enabled": false}` 一律 HTTP 400 "Invalid request parameters"（无 `param` 名）。
+2. Hermes 把它当不可重试 BadRequest → **静默 fallback 到下一 provider**（fallback 链 round 22 起只剩 deepseek-flash），用户视角是「答案风格突变」而非报错，只有 `errors.log` 里的 BadRequest 留痕。
+3. **词表就是全部契约**：280 KB payload、复杂 tool schema、tool_calls 形 history 都能过；而通用 custom/OpenAI-compat 阶梯会发 `max`/`minimal`/`xhigh`，打到 MiMo 必 400。
+
+### 流程与修复
+
+1. **`agent/reasoning_effort.py`**：新增声明式词表 `XIAOMI_MIMO_EFFORTS = ("none", "low", "medium", "high")`（带 live probe 注释），与既有 `OPENAI_COMPAT_WIRE_EFFORTS`/`CODEX_*` 并列。
+2. **`plugins/model-providers/xiaomi/__init__.py`**：平铺 `ProviderProfile` 实例 → `XiaomiProfile` 子类：`supported_reasoning_efforts` 发布 4 值词表；`default_reasoning_config` 未设时给 `medium`（ceiling 默认会烧 ~3x reasoning token，不能让路由默认接管）；`build_api_kwargs_extras` 钳制后**词表外的值丢弃不发**（发 `reasoning_effort=""` 正是 400 的来源）。
+3. **`plugins/model-providers/custom/__init__.py`**：新增 `_wire_efforts_for(base_url)` per-host 词表——`*.xiaomimimo.com` 用 MiMo 词表，其余 custom 端点维持宽词表**逐字透传**（#114249 回归护栏：`max` 不得被压档）；`str()` 包裹 effort，YAML 里的 bool/int 不进 `.strip()` 也不上 wire。
+
+**取舍**：`clamp_effort` 既有语义原样复用（"none" 不作降档目标 → `minimal→low`、`ultra→high`，ultra 是 EFFORT_LADDER 里的 Hermes-internal 档），没为 MiMo 加特例分支；per-host 判据只认 hostname 后缀，未知端点一律宽词表。
+
+### 验证
+
+- `scripts/run_tests.sh tests/plugins/model_providers/{test_xiaomi_profile,test_custom_profile,test_thinking_toggle_parity}.py tests/hermes_cli/test_gui_command.py` → **133 passed / 0 failed / 20 skipped**（skip = macos/windows lane marker，预期）。`test_xiaomi_profile.py` 16 个为本波新增（钳制/丢弃/默认值/双 profile 各面）；`test_custom_profile.py` 24 个证明既有透传契约未破；`test_gui_command.py` 75 个证明 round 24 未被波及。
+- 生产调用点核对（真路径，非 mock）：`agent/transports/chat_completions.py::_build_kwargs_from_profile` 与 `agent/auxiliary_client.py::_project_provider_profile` 均向 `build_api_kwargs_extras` 传 `base_url` → per-host 钳制在主 transport 与 aux/MoA 路径都生效，不是测试专属逻辑。
+
+### 下次注意点
+
+1. **MiMo 词表判据**：`reasoning_effort ∈ {none,low,medium,high}` 小写四值，其余 400→静默 fallback；症状是「答案风格突变」而非报错，查 `errors.log` 的 BadRequest 才见得到。
+2. custom 的 per-host 钳制只挂在 `elif effort:` 尾部：groq 的 `none/default` 分支（#75089）与 Ollama 的 `none` 双发（#14820/#25758）不受影响。新 strict host 加进 `_wire_efforts_for` 即可，不要动 clamp 语义。
+3. 本波 4 个文件 + round 24 的 3 个文件都是 fork 私有补丁（`main_desktop.py`、`test_gui_command.py` 属 R6 重叠文件），同步后按 R5 逐行核对。
+
+### 待办
+
+1. **用户侧真机冒烟**：对 MiMo 发一次 `effort: max` 确认不再静默 fallback（需要你的会话/额度配合，不自动替你消费额度）。
+2. （承 round 24）`test_desktop_build_lock.py` 既有卡死（`test_gui_releases_lock_after_build_failure` 391s 超时）保持「fork 既有失败」标记，未深挖。
+
+---
+
 ## 2026-10-01（第二十四轮）: desktop 中文输入第三次失效——launcher env 缺 IME 变量 + fcitx5 双实例互踢，双修
 
 ### 背景（症状与实证数字）
