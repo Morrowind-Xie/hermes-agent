@@ -4,6 +4,120 @@
 
 ---
 
+## 2026-10-02（第二十六轮）: 上游同步至 `10c6188de1`（692 → 0）—— 2 冲突（locale 拆模块），i18n 迁址 + 1 个合并产物修复
+
+### 背景（同步前数字）
+
+| 项 | 值 |
+|---|---|
+| 同步前 behind / ahead | **692 / 112**（含 round 20~25 的 8 笔 + 既有 104） |
+| 上游范围 | **835 文件，+50813 / −11546** |
+| 上游 tip | `10c6188de1`（2026-10-02 00:01 -0700，`catalog(hindsight): pin the released v1.2.1`） |
+| 稳定 tag | `SYNCED v2026.9.24`（无新稳定 tag；本轮**用户主动发起**） |
+| 热点目录 | `apps/desktop/electron/` 6.9%、`agent/` 5.2%、`apps/desktop/src/store/` 4.5%、`i18n/` 4.1%、`hermes_cli/` 3.9% |
+
+### 流程（R2）
+
+1. **预检**：工作区干净；但 `main(4d8e09280a) ≠ fork/main(16aa92808b)` —— round 24/25 尚未推送，本轮推送一并带上。记下 **gateway PID 475（7 profiles）**、**webui PID 476**、electron 未运行。
+2. **回滚包（R12）**：`/tmp/rb/20261002-151452`（7 份 `.env` + 7 份 `config.yaml` + `unit.service` + `unit-webui.service` + `gateway_state.json` + `state.txt`）。
+3. `git merge-tree` 预演 2 冲突 → 实跑同样 2 冲突，无意外。
+4. 解冲突 → R5 → R6 → 全串行验证链 → 本日志 → 推送 → 服务重启。
+
+### 冲突与取舍（2 个，都是 locale 大块）
+
+| 文件 | 冲突内容 | 取舍 |
+|---|---|---|
+| `apps/desktop/src/i18n/ar.ts` | 上游把 3769 行单体对象**拆成 12 个域模块**（`ar_chat.ts`/`ar_common.ts`…），主文件变 45 行组合层；我方还是旧单体 + 2 个私有 key（`426ef1dea2` pool 饱和提示） | **取上游结构**（组合层 + 干净尾部，3832→60 行），我方 2 key（共 4 行）**逐字迁入新 `ar_boot.ts` 的 `boot.errors`**（`ipcBridgeUnavailable` 之后） |
+| `apps/desktop/src/i18n/zh-hant.ts` | 同上（2388 行 vs 17 行组合层） | 同上（2568→177 行，2 key 迁入 `zh-hant_boot.ts`） |
+
+**落位证据**：en.ts 513-515 与 types.ts 547-549 均把 2 key 放在 `ipcBridgeUnavailable` 紧后 = `boot.errors` 域；`locales/_keys.desktop.json` 修复后也吐出 `boot.errors.localBackendPoolSaturated*` 两条——三方口径互证。de/es/fr 无这 2 key 属**既有状态**（`TranslationOverrides` 允许缺省覆盖，round 19 typecheck rc=0 佐证），不动。
+
+### R5 逐行存活校验（已跑，脚本 `/tmp/sync5/verify_private.py`）
+
+```
+BASE=eb8d21f48214  REF=4d8e09280a
+files_with_private_changes=45
+added_lines_checked=2283
+relocated_to_new_modules=8   # i18n 2 key × 2 locale，按迁址映射核对
+files_deleted_in_merge=0
+missing_total=0
+```
+
+`EXPECTED_REWRITES` 白名单**为空**（8 行用迁址映射核对，非白名单豁免）。
+
+### R6 语义复核（7 个重叠文件，全部过）
+
+- **`gateway/run_turn.py`**：`message_text` 2263 行赋值 → 2344 行 `bridge_user_msg=message_text` 使用（同函数、赋值在前 ✓）；`response` 来自 2333 `_hmwa_shape_agent_response`（silence 判定在此）→ 2338 prepend_reasoning → 2342 footer = **判定后的值** ✓。
+- **`hermes_cli/main_desktop.py`**：round 24 的 `_IM_ENV_VARS`/`_gtk_im_module_dirs`/`_detect_linux_im_framework`/`_complete_linux_im_env` 全在（1415-1480），`_complete_linux_im_env(env)` 在 1753 被 `_desktop_launch_env`（1704-1765）调用 ✓；`HERMES_DESKTOP_HERMES` 1764 ✓；`config_electron_flags` 贯通 source/打包双路径 ✓。
+- **`tests/hermes_cli/test_gui_command.py`**：`_prepare_source_launch_tree` + electron_flags 用例 + 4 个 IME 用例都在 ✓。
+- **`agent/auxiliary_client.py`**：`reasoning_content` 剥离逻辑在位（6677-6683）✓。
+- **`apps/desktop/electron/main.ts`**：`selectPoolEvictions` import 429 + 使用 12131 ✓；`pool-eviction.ts` 未被上游动。
+- **`apps/desktop/src/i18n/*`**：三方 key 口径 0 重复；`src/i18n` + `src/store` + `pool-eviction` vitest 全过 ✓。
+- **`plugins/platforms/dingtalk/adapter.py`**（上轮新增的 R6 项）：`from agent.i18n import t` 52 行 ✓，4 个私有方法 558/565/579/606 ✓，`_PLUGIN_COMPAT` 命中 **0** ✓（上游删除正确落地）。
+
+### 验证结果（全串行，R3；pytest 之后的 JS 链因脚本 cd 异常由手跑补齐，见「工作流」）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home，`tests/{hermes_cli,gateway,agent,tools,tui_gateway,plugins,cron}`） | **4653 文件 / 48764 passed / 11 failed / 559 skipped**（2511.1s，-j 12）+ 1 收集错；9 FLAKY（重试即过） |
+| 2 | `uv lock --check`（PM uv 0.12.3） | **rc=0**（Resolved 334 packages） |
+| 3 | 依赖层 | `pyproject.toml`/`uv.lock`/`pm/lock.json`/`package-lock.json` **全部未变** → 无需 `hermes pm install`、无需 `npm ci`（assistant-ui 补丁探针=1 仍在） |
+| 4 | typecheck | `apps/desktop` **rc=0**（4 套 tsconfig）、`ui-tui` **rc=0**、`web` **rc=0** |
+| 5 | **eslint**（R3 门槛） | `apps/desktop src/ electron/ --quiet` **0 行**、`ui-tui` **0 行**、`web` **0 行** |
+| 6 | 定向 vitest（`src/i18n` + `src/store` + `electron/pool-eviction`） | **rc=0** 全过 |
+| 7 | electron vitest（project electron，352 文件） | **3306 passed / 6 failed / 16 skipped** → 复跑定性后**仅剩 3 个环境性失败**（见下表） |
+| 8 | desktop build（渲染层 + 主进程 bundle，比上轮多做的一步） | **rc=0** |
+| 9 | ui-tui build / web build | **rc=0** / **rc=0**（`hermes_cli/web_dist`） |
+| 10 | 其他 | 冲突标记 **0**；R4 四文件全在、`selectPoolEvictions` 2 处；R7 探针 `('_handle_bridge_command', True) 44` 精确命中 |
+
+### 失败定性（11 failed + 1 收集错 + electron 6 failed；**无一为本轮引入的回归**）
+
+**pytest 侧**（× = 与第十九轮同名单的既有/环境）：
+
+| 失败 | 定性 |
+|---|---|
+| `test_gateway_service.py` ×1 / `test_user_providers_model_switch.py` ×2 / `test_openviking_provider.py` ×1 / `test_bot_desktop_browser.py` ×1 / `test_bot_relay_windows_paths.py` ×1 | × 既有（PM shim ExecStart、Ollama 11434 真开、端口状态、`_hermes_cli()` 指 PM launcher） |
+| `test_termux_api_detection.py` ×1 / `test_voice_wsl_pipewire.py` ×1 / `test_voice_mode.py` ×1 | × WSL 主机 |
+| `test_web_keyless_fallback.py` ×2 | × 测试环境缺可选 extra `parallel-web` |
+| `test_desktop_build_lock.py`（391s SIGKILL） | × 既有卡死（round 24 待办②原样） |
+| **`test_fal_sdk.py`（收集错）** | **新**：上游新测试 `import fal_client` → 测试环境缺可选 extra，与 `parallel-web` 同类 |
+| **`test_bot_mode_dm.py`（300s SIGKILL）** | **新**：-j12 并发超时；**单独跑 78 测 5.8s 全过** → 纯负载 |
+| FLAKY ×9（`test_client_e2e`/`test_failure_writer_ownership`/`test_worktree_selfheal`/`test_file_sync`/`test_file_state_registry`/`test_process_heartbeat`/`test_tui_gateway_server` 等） | 重试即过，时序抖动 |
+
+**electron vitest 侧**：
+
+| 失败 | 定性 |
+|---|---|
+| `scripts/i18n-keys.test.mjs`（`locales/_keys.desktop.json` 与 en.ts 失同步） | **本轮修掉**（`df8b515fc3`）：根因是 `426ef1dea2` 加 key 后没重新生成 manifest，上游本波新增该校验测试把它抓出 |
+| `electron/update-prerequisites.test.ts` ×1 | 负载时序；**单独复跑 PASS** |
+| `scripts/mac-sign.test.mjs` ×1 | 缺 `HERMES_PYTHON` 环境变量（测试自身声明的需求）；补上后 PASS |
+| `scripts/mac-sign.test.mjs` ×1 | **WSL 主机**：`@electron/osx-sign` 把内核串 `6.18.33.2-microsoft-standard-WSL2` 当 semver 解析炸掉 |
+| `electron/source-backend.test.ts` + `electron/backend-probes-runtime.test.ts` | × 既有（遗留 `venv`=3.12 vs `==3.14.*`） |
+
+### 工作流（本轮实际踩的坑）
+
+1. **串行验证链脚本**（`/tmp/chain.sh`，等 pytest 后依次 typecheck→eslint→vitest→build）在 ui-tui 步报 `cd: ui-tui: No such file or directory` 退出（原因未查明，目录实际存在）——**ui-tui/web 两组已手动补齐并全绿**，结果等价。
+2. 终端持续有 `^C source venv/bin/activate` 噪声注入，长命令完成回执经常丢失；对策=输出重定向到文件再读（本轮后半段全程如此）。后台验证任务一律 `setsid nohup` 脱离终端。
+
+### 下次同步的注意点
+
+1. **新起算点**：下次 `BASE` = `10c6188de188`（本轮合并的上游 tip）。
+2. **i18n 拆模块后的私有 key 落点**：我们的 2 个 pool key 在 `ar_boot.ts`/`zh-hant_boot.ts` 的 `boot.errors`；上游若再重构该区按并集处理（R5 的 `RELOCATIONS` 迁址映射思路可复用）。
+3. **改 `en.ts` 必须重跑 `npm run i18n:keys` 并提交 `locales/_keys.desktop.json`** —— 上游有测试把关（本轮即被抓住）。
+4. **electron vitest 的 3 个环境性失败基线**：`source-backend`/`backend-probes-runtime`（venv 3.12）、`mac-sign` 的 WSL 内核串；跑 mac-sign 需 `HERMES_PYTHON=<PM env python>`。
+5. **测试环境缺可选 extra 是常态**：上游新测试带新 SDK（`fal_client`）时会出现收集错，属环境非回归。
+6. `test_bot_mode_dm.py`（78 测）在 -j12 下会撞 300s 文件超时；判负载型先单独跑（5.8s）再定性。
+
+### 待办
+
+1. **desktop（electron-builder）打包未跑**（沿第十九轮口径：`apps/desktop/dist` 已由本轮 build 重建为新产物，打包耗时很长且当前无 electron 进程；如需安装包单独跑 `npm run dist --workspace apps/desktop`）。
+2. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 待办②延续）。
+3. 承第十九轮：是否给 R1 加「规模触发」提示（692 提交 / 835 文件照样静默堆积）待用户决定。
+
+---
+
+---
+
 ## 2026-10-01（第二十五轮）: MiMo 的 reasoning_effort 是 4 值枚举——per-host 钳制，堵住「400 → 静默 fallback」
 
 ### 背景（症状与实证数字）
