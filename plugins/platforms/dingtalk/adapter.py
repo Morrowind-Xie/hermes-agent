@@ -137,6 +137,41 @@ _DINGTALK_TYPE_SUFFIXES = {
     "zip": "zip", "pdf": "pdf", "rar": "rar", "7z": "7z", "txt": "txt",
 }  # media/upload `file` type accepts ONLY these extensions; everything else degrades to "其他文件".
 
+_CONTACTS_FILE = "dingtalk_contacts.json"
+
+
+def _contacts_path() -> Path:
+    """Profile-scoped contact cache path (never hardcode ~/.hermes)."""
+    from hermes_constants import get_hermes_home
+    return get_hermes_home() / "state" / _CONTACTS_FILE
+
+
+def _load_contacts() -> Dict[str, Any]:
+    """chat_id -> {"staff_id", "sender_id", "is_group", "updated_at"} — survives restarts so
+    proactive (cron) sends can address the DM without a fresh inbound message."""
+    try:
+        return json.loads(_contacts_path().read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+
+
+def _save_contact(chat_id: str, *, staff_id: str = "", sender_id: str = "", is_group: bool = False) -> None:
+    if not chat_id:
+        return
+    try:
+        contacts = _load_contacts()
+        entry = contacts.setdefault(chat_id, {})
+        entry.update({k: v for k, v in (("staff_id", staff_id), ("sender_id", sender_id)) if v})
+        entry["is_group"] = is_group
+        entry["updated_at"] = datetime.now(tz=timezone.utc).isoformat()
+        path = _contacts_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(contacts, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:
+        logger.debug("Failed to persist dingtalk contact for %s", chat_id[:24], exc_info=True)
+
 
 def _csv_set(raw: Any) -> Set[str]:
     """Split a list, JSON-list string or comma-separated string into a set of stripped, non-empty items."""
@@ -479,6 +514,7 @@ class DingTalkAdapter(BasePlatformAdapter):
         if chat_id:
             self._message_contexts[chat_id] = message
             self._done_emoji_fired.discard(chat_id)
+            _save_contact(chat_id, staff_id=sender_staff_id, sender_id=sender_id, is_group=is_group)
         session_webhook = getattr(message, "session_webhook", None) or ""
         if session_webhook and chat_id and _DINGTALK_WEBHOOK_RE.match(session_webhook):
             if len(self._session_webhooks) >= _SESSION_WEBHOOKS_MAX:
@@ -512,8 +548,10 @@ class DingTalkAdapter(BasePlatformAdapter):
         logger.debug("[%s] send() chat_id=%s card_enabled=%s", self.name, chat_id, bool(self._card_template_id and self._card_sdk))
         session_webhook = metadata.get("session_webhook") or (self._get_valid_webhook(chat_id) or ("",))[0]
         if not session_webhook:
-            logger.warning("[%s] No valid session_webhook for chat_id=%s", self.name, chat_id)
-            return SendResult(success=False, error="No valid session_webhook available. Reply must follow an incoming message.")
+            # Proactive sends (cron/home delivery) have no session webhook — deliver as a robot
+            # OpenAPI text message instead (recipient resolved via the persisted contact cache).
+            logger.info("[%s] No session_webhook for chat_id=%s — sending via robot OpenAPI", self.name, chat_id[:24])
+            return await self._send_file_message(chat_id, "sampleMarkdown", {"title": "Hermes", "text": self._normalize_markdown(content[: self.MAX_MESSAGE_LENGTH])})
         if not self._http_client:
             return SendResult(success=False, error="HTTP client not initialized")
         current_message = self._message_contexts.get(chat_id)
@@ -612,11 +650,15 @@ class DingTalkAdapter(BasePlatformAdapter):
         """
         message = self._message_contexts.get(chat_id)
         robot_code = (getattr(message, "robot_code", None) or self._robot_code) if message else self._robot_code
-        is_group = bool(message) and str(getattr(message, "conversation_type", "1")) == "2"
-        if message is None and chat_id.startswith("cid"):
-            is_group = True  # cached webhook origin (cron/home delivery): treat as group-addressable space
-        recipient, target_field = (chat_id, "openConversationId") if is_group else (
-            (getattr(message, "sender_staff_id", "") if message else ""), "userId")
+        if message is not None:
+            is_group = str(getattr(message, "conversation_type", "1")) == "2"
+            recipient_staff = getattr(message, "sender_staff_id", "") or ""
+        else:
+            # Restart / proactive (cron) context: fall back to the persisted contact cache.
+            contact = _load_contacts().get(chat_id) or {}
+            is_group = bool(contact.get("is_group", chat_id.startswith("cid")))
+            recipient_staff = contact.get("staff_id", "")
+        recipient, target_field = (chat_id, "openConversationId") if is_group else (recipient_staff, "userId")
         if not recipient:
             return SendResult(success=False, error=(
                 "No sender_staff_id on record for this DM — DingTalk OpenAPI cannot proactively "
@@ -836,8 +878,10 @@ class _IncomingHandler(dingtalk_stream.ChatbotHandler if DINGTALK_STREAM_AVAILAB
 
 
 async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_files=None, force_document=False):
-    """Out-of-process delivery (standalone_sender_fn) via the static robot webhook (DINGTALK_WEBHOOK_URL / extra
-    ``webhook_url``) — per-session webhooks aren't available to cron jobs."""
+    """Out-of-process delivery (standalone_sender_fn). Prefers the static robot webhook
+    (DINGTALK_WEBHOOK_URL / extra ``webhook_url``); falls back to the robot OpenAPI
+    (oToMessages/batchSend, recipient from the persisted contact cache) so cron/home
+    delivery works without any webhook — per-session webhooks aren't available to cron jobs."""
     try:
         import httpx
     except ImportError:
@@ -845,22 +889,61 @@ async def _standalone_send(pconfig, chat_id, message, *, thread_id=None, media_f
     # Scoped: the webhook URL carries the robot's access_token and IS the delivery target — a raw
     # environ read would post a secondary profile's cron output to the default profile's robot.
     webhook_url = (getattr(pconfig, "extra", {}) or {}).get("webhook_url") or _get_scoped_secret("DINGTALK_WEBHOOK_URL", "")
-    if not webhook_url:
+    if webhook_url:
+        try:
+            async with httpx.AsyncClient(timeout=30.0) as client:
+                resp = await client.post(webhook_url, json={"msgtype": "text", "text": {"content": message}})
+                resp.raise_for_status()
+                data = resp.json()
+            if data.get("errcode", 0) != 0:
+                return send_error(f"DingTalk API error: {data.get('errmsg', 'unknown')}")
+            return {"success": True, "platform": "dingtalk", "chat_id": chat_id}
+        except Exception as e:
+            try:  # send_message_tool._error redacts access_token from webhook URLs (lazy import avoids a circular)
+                from tools.send_message_tool import _error as _redact_error
+                return _redact_error(f"DingTalk send failed: {e}")
+            except Exception:
+                return send_error(f"DingTalk send failed: {e}")
+    # --- OpenAPI fallback (no webhook configured): token -> oToMessages/batchSend ---
+    extra = getattr(pconfig, "extra", {}) or {}
+    client_id = extra.get("client_id") or _get_scoped_secret("DINGTALK_CLIENT_ID", "")
+    client_secret = extra.get("client_secret") or _get_scoped_secret("DINGTALK_CLIENT_SECRET", "")
+    if not client_id or not client_secret:
         return send_error("DingTalk not configured. Set DINGTALK_WEBHOOK_URL env var or webhook_url in dingtalk platform extra config.")
+    contact = _load_contacts().get(chat_id) or {}
+    is_group = bool(contact.get("is_group", chat_id.startswith("cid")))
+    recipient = chat_id if is_group else contact.get("staff_id", "")
+    if not recipient:
+        return send_error("No sender_staff_id on record for this DM — the user must message the bot once first (then retry).")
+    robot_code = extra.get("robot_code") or client_id
     try:
         async with httpx.AsyncClient(timeout=30.0) as client:
-            resp = await client.post(webhook_url, json={"msgtype": "text", "text": {"content": message}})
+            tok = await client.post("https://api.dingtalk.com/v1.0/oauth2/accessToken",
+                                    json={"appKey": client_id, "appSecret": client_secret})
+            tok.raise_for_status()
+            token = tok.json().get("accessToken")
+            if not token:
+                return send_error(f"DingTalk accessToken error: {str(tok.json())[:200]}")
+            url = ("https://api.dingtalk.com/v1.0/robot/groupMessages/send" if is_group
+                   else "https://api.dingtalk.com/v1.0/robot/oToMessages/batchSend")
+            body = {"robotCode": robot_code, "msgKey": "sampleMarkdown",
+                    "msgParam": json.dumps({"title": "Hermes", "text": message}, ensure_ascii=False)}
+            if is_group:
+                body["openConversationId"] = recipient
+            else:
+                body["userIds"] = [recipient]
+            resp = await client.post(url, json=body, headers={"x-acs-dingtalk-access-token": token})
             resp.raise_for_status()
             data = resp.json()
         if data.get("errcode", 0) != 0:
             return send_error(f"DingTalk API error: {data.get('errmsg', 'unknown')}")
         return {"success": True, "platform": "dingtalk", "chat_id": chat_id}
     except Exception as e:
-        try:  # send_message_tool._error redacts access_token from webhook URLs (lazy import avoids a circular)
+        try:
             from tools.send_message_tool import _error as _redact_error
-            return _redact_error(f"DingTalk send failed: {e}")
+            return _redact_error(f"DingTalk OpenAPI send failed: {e}")
         except Exception:
-            return send_error(f"DingTalk send failed: {e}")
+            return send_error(f"DingTalk OpenAPI send failed: {e}")
 
 
 def interactive_setup() -> None:
