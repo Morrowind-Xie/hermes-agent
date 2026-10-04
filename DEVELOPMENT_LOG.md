@@ -4,6 +4,108 @@
 
 ---
 
+## 2026-10-04（第二十七轮）: 上游同步至 `ea81748579ee`（1067 → 0）—— **0 冲突**，dingtalk 私有功能入库 + 验证链顺序修复（build:ink 先行）
+
+### 背景（同步前数字）
+
+| 项 | 值 |
+|---|---|
+| 同步前 behind / ahead | **1067 / 115**（含 round 26 后新私有 1 笔 dingtalk） |
+| 上游范围 | **1237 文件，+39342 / −30185** |
+| 上游 tip | `ea81748579ee`（2026-10-03 23:49 -0400，`Merge PR #128768 llamacpp-0.5.0-linux-cuda-main`） |
+| 稳定 tag | `SYNCED v2026.9.24`（无新稳定 tag；本轮**用户主动发起**） |
+| 热点目录 | `apps` 347、`tests` 269、`plugin-catalog` 114、`hermes_cli` 104、`website` 65、`plugins`/`agent` 38、`locales` 35、`tools` 31、`scripts` 27、`ui-tui` 20 |
+
+### 流程（R2）
+
+1. **预检**：工作区**不干净**——`plugins/platforms/dingtalk/adapter.py` 有一份完整的未提交功能（联系人缓存持久化 + `_standalone_send` OpenAPI 兜底，+97/−14）。按「私有工作必须被 R5 覆盖」原则先作为独立提交 **`b03fc4483f`** 保住（py_compile 过、import 齐）。随后 `main == fork/main`。记下 **gateway PID 440（7 profiles）**、**dashboard PID 441**、electron 未运行。
+2. **回滚包（R12）**：`/tmp/rb/20261004-134954`（7 份 `.env` + 7 份 `config.yaml` + `unit.service` + `unit-webui.service` + `gateway_state.json` + `state.txt`）。
+3. `git merge-tree` 预演 **0 冲突** → 实跑 `git merge origin/main --no-edit` 同样 **0 冲突**（1067 提交自动合并，本轮无取舍）。
+4. R5 → R6 → 全串行验证链 → 本日志 → 推送 → 服务重启。
+
+### 冲突与取舍
+
+**0 个。** 1067 提交 / 1237 文件全自动合并，R6 照常逐项复核（零文本冲突 ≠ 零复核）。
+
+### R5 逐行存活校验（脚本 `/tmp/sync/verify_private.py`，本轮重建）
+
+```
+BASE=10c6188de1  REF=b03fc4483f
+checked_total=2370
+missing_total=0
+```
+
+`EXPECTED_REWRITES` 白名单为空。`b03fc4483f` 的 dingtalk +97 行也在校验范围内，全存活。
+
+### R6 语义复核（7 个重叠文件，全部过）
+
+- **`gateway/run_turn.py`**：`message_text` 2265 行赋值（`prepared.message_text` 解包）→ 2346 行 `bridge_user_msg=message_text` 使用（同函数、赋值在前 ✓）；`response` 来自 2335 `_hmwa_shape_agent_response`（silence 判定在此）→ 2341 prepend_reasoning → 2345 footer = **判定后的值** ✓。
+- **`hermes_cli/main_desktop.py`**：`config_electron_flags` 1749 赋值 → source 路径 2011 `[str(executable), ".", *config_electron_flags]` + packaged 2019 + bundled 2165 三路贯通 ✓；`HERMES_DESKTOP_HERMES` 1787 ✓。
+- **`tests/hermes_cli/test_gui_command.py`**：`_prepare_source_launch_tree`（1228）+ 2 个 electron_flags 用例（1248/1280）都在 ✓。
+- **`agent/auxiliary_client.py`**：`reasoning_content` 剥离逻辑 6802-6810 ✓。
+- **`apps/desktop/electron/main.ts`**：`selectPoolEvictions` import 429 + 使用 12096 ✓；`localBackendSlotsThatMayFree`（12093）→ `decideLocalBackendAdmission`（12267）链路完好 ✓。
+- **`apps/desktop/src/i18n/*`**：`src/i18n` vitest 全过 ✓。
+- **`plugins/platforms/dingtalk/adapter.py`**：合并零冲突；`_save_contact`/`_load_contacts`/OpenAPI fallback 在位 ✓（本轮私有提交 `b03fc4483f`）。
+
+### 验证结果（全串行，R3）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home，`tests/{hermes_cli,gateway,agent,tools,tui_gateway,plugins,cron,pm,scripts}`） | **4921 文件 / 51099 passed / 13 failed / 691 skipped**（2509.5s，-j 12）+ 2 FLAKY |
+| 2 | `uv lock --check`（PM uv 0.12.3） | **rc=0** |
+| 3 | 依赖层 | `pm/lock.json` +154 变 / `pyproject.toml` 11 / `uv.lock` 45 → **deps changed → `hermes pm install` rc=0**（无需 `npm ci`，`package-lock.json` 未变） |
+| 4 | typecheck | `apps/desktop`（4 套 tsconfig）**rc=0**、`ui-tui` **rc=0**、`web` **rc=0** |
+| 5 | **eslint**（R3 门槛） | `apps/desktop src/ electron/ --quiet` **0 行**、`ui-tui` **0 行**、`web` **0 行** |
+| 6 | ui-tui `i18n:keys:check` | **rc=0** |
+| 7 | 定向 vitest（`src/i18n` + `src/store` + `electron/pool-eviction`） | **2 failed**（voice-prefs，见定性）其余全过 |
+| 8 | electron vitest（project electron，356 文件） | **3329 passed / 4 failed / 16 skipped** → 3 文件失败与上轮基线一致 |
+| 9 | ui-tui vitest | 链内首跑 77 文件失败 = **`hermes-ink` dist 未建**（链顺序缺陷，见工作流）→ 补 `npm run build:ink` 后 **176 文件 / 1621 tests 全过** |
+| 10 | web vitest | **rc=0** 全过 |
+| 11 | builds | ui-tui / web（`hermes_cli/web_dist`）/ desktop **全 rc=0** |
+| 12 | 其他 | 冲突标记 **0**；R4 三文件全在、`selectPoolEvictions` 2 处；R7 探针 `('_handle_bridge_command', True) 44` 精确命中；py_compile 5 模块 OK |
+
+### 失败定性（13 pytest failed + electron 4 + vitest 2；**无一为本轮引入的回归**）
+
+**pytest 侧**（× = 上轮同名单既有/环境）：
+
+| 失败 | 定性 |
+|---|---|
+| `test_gateway_service.py` ×1 / `test_user_providers_model_switch.py` ×2 / `test_openviking_provider.py` ×1 / `test_bot_desktop_browser.py` ×1 / `test_bot_relay_windows_paths.py` ×1 | × 既有 |
+| `test_desktop_build_lock.py`（391s SIGKILL）/ `test_bot_mode_dm.py`（300s SIGKILL）/ `test_fal_sdk.py`（收集错） | × 既有（卡死 / 负载 / 缺 `fal_client` extra） |
+| `test_termux_api_detection.py` ×1 / `test_voice_wsl_pipewire.py` ×1 / `test_voice_mode.py` ×1 | × WSL 主机 |
+| `test_web_keyless_fallback.py` ×2 | × 测试环境缺可选 extra `parallel-web` |
+| **`test_inventory_pricing.py` ×1 / `test_shared_profile_warning.py` ×1** | **新**：单跑即过（3 passed 9.8s / passed）→ **负载型** |
+| **`test_icon_flavors.py`（300s SIGKILL）** | **新**：单跑 12 passed 79.76s → **负载型** |
+| **`test_fresh_source_install.py`（300s SIGKILL）** | **新**：上游新重型 E2E（3 参数化各跑真实 `install.sh` + uv 解析）；单跑 `[missing-wheel]` 也超时在**测试内置 180s 子进程预算**（`TimeoutExpired: install.sh`）→ **时长型**，非回归 |
+
+**electron vitest 侧**（3 文件 / 4 测试，与上轮基线一致）：`mac-sign.test.mjs` ×2（缺 `HERMES_PYTHON` + WSL 内核串）、`source-backend.test.ts` + `backend-probes-runtime.test.ts`（遗留 `venv`=3.12 vs `==3.14.*`）。
+
+**vitest 侧**（voice-prefs 2）：`src/store/voice-prefs.test.ts` 2 断言（`localStorage.setItem` mock 抛错时期望 key 不留痕，实际残留 `'false'`）。**非本轮引入**——该测试由 `e49a6afe07`（≤ 上波 `10c6188de1`）进树，本波 `voice-prefs.ts`/`storage.ts`/`vitest.setup.ts`（仅注释）零改动、`package-lock.json` 未变；上轮定向 vitest 恰好不含此文件，属 **fork 首跑即失败**，疑似 jsdom localStorage mock 语义差异。
+
+**FLAKY ×2**：`tests/gateway/test_telegram_prune_stale_topic_binding.py`、`tests/tui_gateway/test_hosted_room_driver_runtime.py`（重试即过，时序抖动）。
+
+### 工作流（本轮实际踩的坑）
+
+1. **验证链里 ui-tui vitest 必须在 `build:ink` 之后**：`hermes-ink` 的 `dist/entry-exports.js` 是包入口，未构建时 77 个测试文件集体 `ERR_MODULE_NOT_FOUND`（870 tests 全数假失败）。ui-tui `check` 脚本顺序即答案：`build:ink → typecheck → i18n:keys:check → test → lint`。已补跑全绿。
+2. **终端 shell 集成长时间挂死**（回执丢失、连 `echo` 都无响应；上轮同病）：对策 = 验证链整体 `setsid nohup` 脱离终端 + 输出落文件 + 轮询。
+3. **重型 E2E（`test_fresh_source_install`）不能按 300s 文件超时判死**：单跑也 3~6 分钟且可能撞测试内置 180s 子进程预算；放宽 `HERMES_TEST_FILE_TIMEOUT` 单独定性。
+
+### 下次同步的注意点
+
+1. **新起算点**：下次 `BASE` = `ea81748579ee`（本轮合并的上游 tip）。
+2. **新增失败基线**：`voice-prefs.test.ts` ×2（jsdom mock 语义）、`test_fresh_source_install.py`（时长型 E2E）；`test_inventory_pricing`/`test_shared_profile_warning`/`test_icon_flavors` 为负载型，单跑定性即可。
+3. **验证链顺序**：ui-tui 侧 `build:ink` 必须先于 `test`。
+4. **dingtalk 私有提交 `b03fc4483f`**（联系人缓存 + OpenAPI fallback）已被 R5 覆盖，下轮 `BASE..REF` 自然包含；`state/dingtalk_contacts.json` 是运行时产物，不入库。
+
+### 待办
+
+1. **desktop（electron-builder）打包未跑**（沿第十九轮口径；如需安装包单独跑 `npm run dist --workspace apps/desktop`）。
+2. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 待办②延续）。
+3. **`voice-prefs.test.ts` 2 失败未修**（上游测试、非本 fork 引入；等上游动该文件时一并看 jsdom mock 语义，或单独修）。
+4. **服务重启只动 systemd 服务**（gateway / webui），**不碰用户正在用的微信桥 / TUI 进程**——桥若随 gateway 短暂断线属预期（systemd 自动拉起、平台侧消息排队）。
+
+---
+
 ## 2026-10-02（第二十六轮）: 上游同步至 `10c6188de1`（692 → 0）—— 2 冲突（locale 拆模块），i18n 迁址 + 1 个合并产物修复
 
 ### 背景（同步前数字）
