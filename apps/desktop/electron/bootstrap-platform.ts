@@ -322,4 +322,10 @@ function describeLinuxInputMethod(
   }
 }
 
-export { describeLinuxInputMethod, detectRemoteDisplay, isWindowsBinaryPathInWsl, isWslEnvironment, resolveLinuxPasswordStore }
+export {
+  describeLinuxInputMethod,
+  detectRemoteDisplay,
+  isWindowsBinaryPathInWsl,
+  isWslEnvironment,
+  resolveLinuxPasswordStore
+}
