@@ -115,7 +115,9 @@ R4 三文件全在、`selectPoolEvictions` 2 处、render-loop 补丁生效（su
 3. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
 4. **`hermes update` 的 pack tidy 在本机 git 2.43 可能报错**（上游新代码用 ≥2.44 语法）：升级主机 git 或等上游加版本门；未自动做，改主机 git 属环境变更。
 5. `test_pty_bridge` / `test_process_registry_pty_kill` / `test_icon_flavors` 三项为上游侧失败，未在本 fork 修复（非我方引入；等上游动或单独提 issue/PR）。
-6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**——微信桥是用户正在用的通道。
+6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**——微信桥是用户正在用的通道。重启后复核：gateway `active/running`、`NRestarts=0`（PID 2260088）、webui active（2260089）、`gateway_state` 7 profiles 全在。
+7. **上游本波变更 `session_reset.mode` 语义**：仅 `/new` 或 `/reset` 重置会话，fitness/invest/music/work 4 个 profile 的 `both` 配置在 gateway 启动时告警失效；官方提示如需保留 idle/daily 重置装 `hermes-session-reset-policy` 插件。未自动做——改 4 个 profile 的会话重置语义属用户决策。
+8. 重启后微信侧 home-channel 启动通知报 `iLink sendmessage session not ready`（会话过期、需用户先给 bot 发消息或重新配对）属预期瞬态，平台加载正常。
 
 ---
 
