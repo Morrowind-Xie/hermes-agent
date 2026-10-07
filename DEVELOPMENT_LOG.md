@@ -4,6 +4,121 @@
 
 ---
 
+## 2026-10-07（第二十八轮）: 上游同步至 `f26a0949a413`（1768 → 0）—— 2 冲突（boot 文案拆模块），xiaomi wire 快照收录私有特性 + 4 项上游/环境失败定性（纯上游 worktree 实证）
+
+### 背景（同步前数字）
+
+| 项 | 值 |
+|---|---|
+| 同步前 behind / ahead | **1768 / 118**（ahead = 历轮私有 115 + 第二十七轮合并与日志 3 笔） |
+| 上游范围 | **1878 文件，+133675 / −26472** |
+| 上游 tip | `f26a0949a413`（2026-10-06 23:49 -0500，`fix(tools): gate the set_value verdict on type_text_incomplete`） |
+| 稳定 tag | `SYNCED v2026.9.24`（9.24 后上游未再切稳定 tag，仅 rc/canary 流水线；本轮**用户主动发起**） |
+| 热点目录 | `tests` 509、`apps` 403、`hermes_cli` 212、`plugin-catalog` 115、`website` 90、`tools` 88、`contributors` 64、`agent` 62、`web` 52（+2517/−301）、`scripts`/`plugins` 46、`gateway` 34、`tui_gateway` 29、`pm` 21、`ui-tui` 12 |
+
+### 流程（R2）
+
+1. **预检**：工作区干净，`main == fork/main`（`f95c5113eb`）。记下 **gateway PID 448（7 profiles）**、**webui PID 449**、electron 未运行。
+2. **回滚包（R12）**：`/tmp/rb/20261007-125855`（7 份 `.env` + 7 份 `config.yaml` + `unit.service` + `unit-webui.service` + `gateway_state.json` + `state.txt`，18 项）。
+3. `git merge-tree` 预演 **2 冲突** → 实跑 `git merge origin/main --no-edit` 同样 **2 冲突**（1768 提交），合并提交 **`3dff700966`**。
+4. R5 → R6 → 全串行验证链（`/tmp/sync/chain28.sh`，`setsid nohup` 脱终端）→ 失败定性（纯上游 worktree 对照）→ 快照重生成（`5d66771161`）→ 本日志 → 推送 → 服务重启。
+
+### 冲突与取舍（2 个，boot 文案拆 per-locale 模块，同二十六轮模式）
+
+| 文件 | 冲突内容 | 取舍 |
+|---|---|---|
+| `apps/desktop/src/i18n/en.ts` | 上游把 `boot` 块拆进 `en_boot.ts`（`boot: enBoot.boot`）；我方旧内联块 + 2 私有 key（pool 饱和） | **取上游结构**；2 key **逐字迁入 `en_boot.ts`** `boot.errors`（`ipcBridgeUnavailable` 紧后） |
+| `apps/desktop/src/i18n/types.ts` | 同上（`boot: BootTranslations`，类型抽进 `types_boot.ts`） | 同上（2 key 迁入 `types_boot.ts` `errors`） |
+
+**落位证据**：2 key × 7 文件（`en_boot`/`types_boot` 新家 + `ar_boot`/`zh-hant_boot`/`zh`/`ja`/`ru` 原位）各 2 命中；desktop `i18n-keys.mjs --check` **verified**（与 `locales/_keys.desktop.json` 三方口径互证）。en/types 私有 delta 经 `git diff` 确认**仅**这 2 key（+1 行尾逗号），故冲突侧 `checkout --theirs` 后迁移，无遗漏风险。
+
+### R5 逐行存活校验（脚本 `/tmp/sync/verify_private.py`，tmp 被清后按口径重建）
+
+```
+BASE=ea81748579ee  REF=f95c5113eb
+files_with_private_changes=46
+added_lines_checked=2370
+relocated_to_new_modules=6   # en.ts 4 行 + types.ts 2 行 → en_boot/types_boot（迁址映射）
+expected_rewrites_whitelisted=0
+missing_total=0
+```
+
+
+### R6 语义复核（7 个重叠文件，全部过）
+
+- **`gateway/run_turn.py`**：`message_text` 2265 行赋值（`prepared.message_text` 解包）→ 2346 行 `bridge_user_msg=message_text`（同函数、赋值在前 ✓）；`response` 来自 2335 `_hmwa_shape_agent_response`（silence 判定在此）→ 2341 prepend_reasoning → 2345 footer = **判定后的值** ✓。
+- **`hermes_cli/main_desktop.py`**：`config_electron_flags` 1612 赋值 → 1651 返回 → 1761 解包 → source 1875 / packaged 1883 / bundled 1775 三路贯通 ✓；`HERMES_DESKTOP_HERMES` 1650 ✓。
+- **`tests/hermes_cli/test_gui_command.py`**：`_prepare_source_launch_tree` 1237 + 2 个 electron_flags 用例（1257/1291）✓。
+- **`agent/auxiliary_client.py`**：`reasoning_content` 剥离 6752-6758 ✓（上游本波新增 `auxiliary_*` siblings，剥离逻辑未被搬走）。
+- **`apps/desktop/electron/main.ts`**：`selectPoolEvictions` import 437 + 12032；`localBackendSlotsThatMayFree` 12029 → `decideLocalBackendAdmission` 12203 链路 ✓。
+- **`apps/desktop/src/i18n/*`**：见冲突节，`src/i18n` vitest 全过 ✓。
+- **`plugins/platforms/dingtalk/adapter.py`**：`from agent.i18n import t` 52、`_save_contact`/`_load_contacts` 158/149（调用 517/658/913）、`_standalone_send` 880→1029 挂载 ✓；`_PLUGIN_COMPAT` 0 命中 ✓。
+
+R4 三文件全在、`selectPoolEvictions` 2 处、render-loop 补丁生效（subscribable.js 命中 1）；R7 探针 `('_handle_bridge_command', True) 44` 精确命中；py_compile 5 模块 OK。
+
+### 验证结果（全串行，R3；日志 `/tmp/sync28/`）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home，9 目录常规集，-j 12） | **5074 文件 / 52996 passed / 17 failed / 785 skipped**（2755.9s）+ 3 FLAKY |
+| 2 | `uv lock --check`（PM uv 0.12.3） | **rc=0** |
+| 3 | 依赖层 | `pyproject` −12 / `uv.lock` −112 / `pm/lock.json` 222 行重写 → **deps changed → `hermes pm install` rc=0**（无需 `npm ci`：根 `package.json`/`npm/lock.json` 上游零差异） |
+| 4 | typecheck | `apps/desktop`（4 套 tsconfig）/ `ui-tui` / `web` **全 rc=0** |
+| 5 | **eslint**（R3 门槛） | desktop `src/ electron/ --quiet` **0 行**；ui-tui **0 errors**（2 warnings）；web **0 errors**（28 warnings） |
+| 6 | i18n keys | ui-tui `i18n:keys:check` rc=0；desktop `i18n-keys.mjs --check` **verified** |
+| 7 | 定向 vitest（i18n + store + pool-eviction，实跑 187 文件 / 2114 测试） | 2 failed = `voice-prefs` ×2（既有基线）其余全过 |
+| 8 | electron vitest（project electron，370 文件 / 3638 测试） | **3 文件 / 4 failed** = 上轮基线（`mac-sign` ×2、`backend-probes-runtime`、`source-backend`） |
+| 9 | ui-tui vitest（`build:ink` 先行 ✓） | **178 文件 / 1624 全过** |
+| 10 | web vitest | **58 文件 / 413 全过** |
+| 11 | builds | ui-tui / web（`web_dist`）/ desktop（`dist`）**全 rc=0** |
+| 12 | 其他 | 冲突标记 **0**；快照重生成后 `test_provider_wire_snapshot` **53 passed / 0 failed** |
+
+### 失败定性（17 pytest failed + 4 未跑 + electron 4 + voice-prefs 2；**无一为合并回归**）
+
+**关键证据：纯上游 worktree（`git worktree add /tmp/upcheck f26a0949`）复跑对照**：
+
+| 失败 | 纯上游 | 我方树 | 定性 |
+|---|---|---|---|
+| `test_provider_wire_snapshot` ×1 | **过** | 败 → **已修** | fork 私有 xiaomi reasoning-effort 特性 × 上游本波新快照测试（`1f79eb6450`）相撞 → 按模块 docstring 重生成 golden（**+3 行** `reasoning_effort: high/none/medium`，仅 xiaomi cell，提交 `5d66771161`） |
+| `test_git_pack_tidy` ×1 | 败 | 败 | **环境型**：git 2.43.0 无 `multi-pack-index write --incremental`（standalone 复现 rc=129；上游 `feat(update)` 新代码用 ≥2.44 语法） |
+| `test_pty_bridge` ×1 | 败 | 败 | 上游/WSL 环境型（helper close 时序，`hermes_cli.pty_bridge` 纯上游面） |
+| `test_process_registry_pty_kill` ×1 | 败 | 败 | 上游/WSL 环境型（escapee 存活超预算） |
+| `test_icon_flavors`（未跑类） | **同卡死**（300s SIGKILL） | 600s SIGKILL | 上游本波重写图标（`386e31a56f`）后重型渲染在本机卡死；上轮单跑 80s 过 → 上游波内行为变化 |
+| `test_fresh_source_install`（未跑类） | — | 900s 预算下 `[missing-wheel]`/`[bad-hash]` 仍败 | × 时长型 E2E（延续） |
+| `test_update_pause` ×2 | — | 单跑全过 | × 负载型 |
+| `test_gateway_service` / `test_openviking_provider` / `test_bot_desktop_browser` / `test_bot_relay_windows_paths` 各 ×1 | — | — | × 既有 |
+| `test_inventory_pricing` / `test_shared_profile_warning` 各 ×1 | — | — | × 负载型既有 |
+| `test_termux_api_detection` / `test_voice_mode` / `test_voice_wsl_pipewire` 各 ×1 | — | — | × WSL 既有 |
+| `test_web_keyless_fallback` ×2 | — | — | × 既有（缺 `parallel-web` extra） |
+| `test_desktop_build_lock` / `test_fal_sdk`（未跑类） | — | — | × 既有卡死 / 收集错（缺 `fal_client` extra） |
+
+**较上轮消失**：`test_user_providers_model_switch` ×2、`test_bot_mode_dm`（上游修复或未触发）。**voice-prefs ×2 仍在**（jsdom mock，延续）。**FLAKY ×3**：`test_codex_ttfb_watchdog`、`test_model_options_account_usage`、`test_desktop_update_posix_handoff_protocol`（重试即过）。
+
+### 工作流（本轮实际踩的坑）
+
+1. **`run_tests.sh` 以 `env -i` + 白名单放行启动子进程，会剥掉 `HERMES_UPDATE_WIRE_SNAPSHOT`** —— 重生成快照必须按模块 docstring 直接调 pytest；解释器 = `test-environment/gen-<hash>/venv/bin/python`（**不是** `bin/python`，`active.json` 的键是 `generation`）。
+2. **单跑定性不可与其它测试并发**：icon_flavors 首次单跑与 worktree 复跑撞车又 300s 超时，补跑干净环境才排除负载因素（仍卡死，坐实上游问题）。
+3. **vitest 退出码不可信**（定向步 rc=0 但 2 失败）——判定一律读日志汇总块。
+4. 终端 shell 集成挂死/回执错乱**连续第三轮**：对策不变（`setsid nohup` + 文件日志 + `read_files` 轮询）。
+
+### 下次同步的注意点
+
+1. **新起算点**：下次 `BASE` = `f26a0949a413`。
+2. **`tests/fixtures/provider_wire_snapshot.json` 自本轮起为私有 delta**（xiaomi 3 行）：上游重生成/改 wire 会冲突，解法 = 取上游侧为底后 `HERMES_UPDATE_WIRE_SNAPSHOT=1` 重生成；相关私有面还有 `agent/reasoning_effort.py`、`plugins/model-providers/xiaomi/__init__.py`、`tests/plugins/model_providers/test_xiaomi_profile.py`。
+3. **新增失败基线**：`test_git_pack_tidy`（git 2.43）、`test_pty_bridge`、`test_process_registry_pty_kill`、`test_icon_flavors`（上游卡死）；`test_update_pause` 记为负载型。
+4. `pm/lock.json`/`uv.lock` 上游大幅瘦身（合计 −276 行）；`hermes pm install` 已提交依赖层，environments 目录剪至 7 个 hash。
+
+### 待办
+
+1. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 起延续）。
+2. **`voice-prefs.test.ts` 2 失败未修**（jsdom mock 语义，延续）。
+3. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
+4. **`hermes update` 的 pack tidy 在本机 git 2.43 可能报错**（上游新代码用 ≥2.44 语法）：升级主机 git 或等上游加版本门；未自动做，改主机 git 属环境变更。
+5. `test_pty_bridge` / `test_process_registry_pty_kill` / `test_icon_flavors` 三项为上游侧失败，未在本 fork 修复（非我方引入；等上游动或单独提 issue/PR）。
+6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**——微信桥是用户正在用的通道。
+
+---
+
 ## 2026-10-04（第二十七轮）: 上游同步至 `ea81748579ee`（1067 → 0）—— **0 冲突**，dingtalk 私有功能入库 + 验证链顺序修复（build:ink 先行）
 
 ### 背景（同步前数字）
