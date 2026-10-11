@@ -29,7 +29,10 @@ export const frBoot = {
       gatewaySignInRequiredDetail:
         'Reconnectez-vous pour rétablir la connexion. Vos conversations et paramètres sont en sécurité.',
       signInAgain: 'Se reconnecter',
-      ipcBridgeUnavailable: 'Le pont IPC du desktop est indisponible.'
+      ipcBridgeUnavailable: 'Le pont IPC du desktop est indisponible.',
+      localBackendPoolSaturated: "Limite d'agents locaux atteinte",
+      localBackendPoolSaturatedDetail:
+        "Tous les emplacements du backend local sont occupés par des profils déjà ouverts. Fermez un autre volet de bot ou augmentez la limite dans Paramètres → Avancé, puis rouvrez ce bot."
     },
     causes: {
       exitedEarly: "Le service en arrière-plan de Hermes s'est arrêté juste après son démarrage.",

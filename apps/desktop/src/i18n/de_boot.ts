@@ -29,7 +29,10 @@ export const deBoot = {
       gatewaySignInRequiredDetail:
         'Melden Sie sich erneut an, um die Verbindung wiederherzustellen. Ihre Chats und Einstellungen sind sicher.',
       signInAgain: 'Erneut anmelden',
-      ipcBridgeUnavailable: 'Der Desktop-IPC-Bridge ist nicht verfügbar.'
+      ipcBridgeUnavailable: 'Der Desktop-IPC-Bridge ist nicht verfügbar.',
+      localBackendPoolSaturated: 'Lokale-Agenten-Limit erreicht',
+      localBackendPoolSaturatedDetail:
+        'Jeder lokale Backend-Platz ist von Profilen belegt, die Sie bereits geöffnet haben. Schließen Sie eine andere Bot-Ansicht oder erhöhen Sie die Grenze unter Einstellungen → Erweitert und öffnen Sie diesen Bot erneut.'
     },
     causes: {
       exitedEarly: 'Der Hintergrunddienst von Hermes hat direkt nach dem Start aufgehört.',

@@ -29,7 +29,10 @@ export const esBoot = {
       gatewaySignInRequired: 'Tu Hermes remoto cerró tu sesión',
       gatewaySignInRequiredDetail: 'Vuelve a iniciar sesión para reconectar. Tus chats y ajustes están a salvo.',
       signInAgain: 'Volver a iniciar sesión',
-      ipcBridgeUnavailable: 'Hermes Desktop no pudo comunicarse con su propia capa en segundo plano. Reinicia la app.'
+      ipcBridgeUnavailable: 'Hermes Desktop no pudo comunicarse con su propia capa en segundo plano. Reinicia la app.',
+      localBackendPoolSaturated: 'Se alcanzó el límite de agentes locales',
+      localBackendPoolSaturatedDetail:
+        'Cada ranura del backend local está ocupada con perfiles que ya tienes abiertos. Cierra otro panel de bots o aumenta el límite en Configuración → Avanzado y vuelve a abrir este bot.'
     },
     causes: {
       exitedEarly: 'El servicio en segundo plano de Hermes se detuvo justo después de iniciarse.',
