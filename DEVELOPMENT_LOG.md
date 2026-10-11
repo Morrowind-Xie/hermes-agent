@@ -4,6 +4,100 @@
 
 ---
 
+## 2026-10-11（第三十一轮）: 主力模型反转 —— `deepseek-flash` 主力 / `mimo-v2.6-pro` 备用（7 home + cron 全量）
+
+### 需求
+
+把主力模型从 MiMo 换成 **DeepSeek `deepseek-flash`**，**mimo-v2.6-pro 转为备用**；所有涉及该模型的设置一并调整（承接第二十一/二十二轮的反向操作）。
+
+### 改动前（7 个 home 完全一致）
+
+```yaml
+model:
+  default: mimo-v2.6-pro
+  provider: mimo
+  api_mode: chat_completions
+  base_url: https://token-plan-cn.xiaomimimo.com/v1
+fallback_providers:
+  - provider: deepseek
+    model: deepseek-flash
+    base_url: https://api.deepseek.com/v1
+```
+
+### 改动后（7 个 home 完全一致）
+
+```yaml
+model:
+  default: deepseek-flash
+  provider: deepseek
+  base_url: https://api.deepseek.com/v1          # api_mode 由上游自动清除（mimo 专属路由）
+fallback_providers:
+  - provider: mimo
+    model: mimo-v2.6-pro
+    base_url: https://token-plan-cn.xiaomimimo.com/v1
+```
+
+**落地方式**：官方 CLI `hermes config set <点路径> <值>`（走 PM shim `<repo>/.hermes/bin/hermes`），**每条命令一个独立进程**（沿用第二十一轮口径）。每 home 6 条：`model.default` / `model.provider` / `model.base_url` / `fallback_providers.0.{provider,model,base_url}`。
+
+**上游行为（值得记）**：设 `model.provider` 时会**自动清掉上一个 provider 专属的 `model.base_url` 与 `model.api_mode`**，提示 `that route belonged to mimo, not deepseek`——所以必须**在改 provider 之后再设 base_url**（脚本顺序已如此）。
+
+**凭据零改动**：`custom_providers` 里 `deepseek`（`sk-dddaa…`）与 `mimo`（`tp-ch1dn…`）两块 7 个 home 都在，回退条目从不自带 key（key 来自 `custom_providers[name=<provider>]`，承接第二十二轮口径）。
+
+### "所有相关设置"的盘点与处置
+
+| 位置 | 原值 | 处置 |
+|---|---|---|
+| `model.default/provider/base_url` × 7 home | mimo-v2.6-pro / mimo / token-plan-cn… | **改为** deepseek-flash / deepseek / api.deepseek.com/v1 |
+| `fallback_providers[0]` × 7 home | deepseek / deepseek-flash | **改为** mimo / mimo-v2.6-pro / token-plan-cn.xiaomimimo.com/v1 |
+| cron `beeb41a12d4a` memory月度复盘（enabled） | `custom` / `mimo-v2.6-pro` | **改为** `deepseek` / `deepseek-flash` |
+| cron `cb7bc4343e75` memory整理周检（disabled） | `mimo` / `mimo-v2.6-pro` | **改为** `deepseek` / `deepseek-flash`（保持与其状态一致） |
+| cron 4 个 `deepseek/deepseek-flash` pin（`bc45a8b93f10`/`45b6d4f939f4`/`6b14c42d327f`/`8ba9432d913e`） | deepseek / deepseek-flash | **无需动**（已等于新主力） |
+| cron 其余 13 个（`provider/model=None`，含 invest/coding 两 home 的 5 个） | 跟随主模型 | **自动生效**，无需动 |
+| aux（`title_generation` / `mcp` / `tts_*` 等） | 全 `provider: auto` + 空 model | **自动跟随**新主 provider，无需动 |
+| `delegation.reasoning_effort` | `''`（空） | 无需动 |
+| `.env` / `profiles/*/.env` | 无 mimo 引用 | 无需动 |
+| cron `74e39dc63d76` 每日新闻 | `deepseek` / **`deepseek-v4-pro`** | **保留未动**（显式指定更强型号，不属主力/备用互换范畴） |
+
+
+### 验证（三层，全部实测）
+
+1. **解析层**：`cron.jobs._main_model_pin()` → **`('deepseek', 'deepseek-flash')`**（改前为 `('custom', 'mimo-v2.6-pro')`）。
+2. **配置层**：7 个 home 的 `model.default` / `model.provider` / `model.base_url` **全部**为 `deepseek-flash / deepseek / https://api.deepseek.com/v1`；`hermes fallback list` ×7 均为
+   ```
+   Primary:   deepseek-flash  (via deepseek)
+   Fallback chain (1 entry):
+     1. mimo-v2.6-pro  (via mimo)  [https://token-plan-cn.xiaomimimo.com/v1]
+   ```
+3. **E2E（真机两次）**：
+   - **主力真跑**：`hermes chat -q '…ok' --oneshot`（default home）→ 返回 `ok`，会话 `20261011_163145_efbf8d`，**4 秒**；`agent.log`：`provider=deepseek base_url=https://api.deepseek.com/v1 model=deepseek-flash`、`API call #1 latency=1.3s cache=4096/36125 (11%)`、`Turn ended reason=text_response`。
+   - **回退真实触发**：故意用无凭据 provider 当主模型（`--provider minimax -m MiniMax-Text-01`）→ 日志出现
+     `⚠️ Model fallback: MiniMax-Text-01 via minimax unavailable (authentication failed); using mimo-v2.6-pro via mimo.`
+     → 该 turn 由 **mimo-v2.6-pro** 服务并返回 `ok`（会话 `20261011_163323_c17162`，14 秒）；`auxiliary_client` 的 title_generation 也自动走 `main fallback chain to fallback_providers[0](mimo)`。
+     → **新链不只是配置正确，而是实测能接管回退。**
+
+### 生效与重启
+
+`systemctl --user restart hermes-gateway.service` + `hermes-webui.service`（只动 systemd，不碰微信桥 / TUI 进程）：gateway **MainPID=3844717**、webui 均 `active/running`、**`NRestarts=0`**、`gateway_state` **7 profiles** 全在。重启后 gateway 内的会话与 cron 调度均按新主力解析。
+
+### 回滚
+
+`/tmp/rb/model-switch-20261011-162823/`（7 份 `config.yaml` + 3 份 `cron/jobs.json`，改前快照）。回滚 = 覆盖回文件 + `systemctl --user restart hermes-gateway hermes-webui`。
+
+### 下次注意点
+
+1. **改 provider 前先想好 base_url**：`config set model.provider` 会连带清掉旧 provider 的 `base_url`/`api_mode`（上游行为），顺序必须是"先 provider，后 base_url"。
+2. **cron pin 语义坑（承接第二十一轮）**：`hermes cron edit <id> --pin` 对**已有 model 的任务是 no-op**；必须显式 `--provider/--model`。
+3. **回退条目只写 `provider`/`model`/`base_url`**，key 永远来自 `custom_providers[name=<provider>]`。
+4. 备用链**只有一条**（mimo）：mimo 一旦不可用就没有第二顺位（同第二十二轮对 zai 摘除后的结论）。
+
+### 待办
+
+1. `74e39dc63d76`（每日新闻 21:00）仍显式 pin `deepseek/deepseek-v4-pro` —— **未动**（显式指定更强型号，是否统一到 flash 由你决定）。
+2. 两条验证会话 `20261011_163145_efbf8d`、`20261011_163323_c17162` 可删。
+3. `~/.hermes/config.yaml` 的 `custom_providers[name=bailian]`（qwen3.8 时代的 `sk-sp-H.…`）已无引用；是否清理凭据未动（删凭据不可逆）。
+
+---
+
 ## 2026-10-11（第三十轮）: 上游同步至 `1f2b9e0864`（103 → 0，**0 冲突**）—— run() rc 捕获 bug 揪出 + `npm ci` 被 EBADENGINE 硬门挡住（node_modules 未刷新，记待办）
 
 ### 背景（同步前数字）
