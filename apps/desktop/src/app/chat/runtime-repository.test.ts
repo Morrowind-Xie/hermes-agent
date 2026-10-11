@@ -279,6 +279,7 @@ describe('useRuntimeMessageRepository reference identity', () => {
       text('assistant-1', 'assistant', 'a'),
       text('assistant-2', 'assistant', 'b')
     ]
+
     const { result, rerender } = renderWith(messages)
     const first = result.current
 
