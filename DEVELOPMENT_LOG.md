@@ -92,7 +92,7 @@ fallback_providers:
 
 ### 待办
 
-1. ~~`74e39dc63d76`（每日新闻 21:00）仍显式 pin `deepseek/deepseek-v4-pro`~~ → **已按用户指示统一**：`hermes cron edit 74e39dc63d76 --provider deepseek --model deepseek-flash`（2026-10-11 16:5x）。现 **default home 19 个 cron 任务的 model 口径完全一致**：6 个显式 `deepseek/deepseek-flash`、13 个跟随主模型。
+1. ~~`74e39dc63d76`（每日新闻 21:00）仍显式 pin `deepseek/deepseek-v4-pro`~~ → **已按用户指示统一**：`hermes cron edit 74e39dc63d76 --provider deepseek --model deepseek-flash`（2026-10-11 16:5x）。现 **default home 19 个 cron 任务的 model 口径完全一致**：`('deepseek','deepseek-flash') → 7`、`(None,None) → 12`（跟随主模型）、**`mimo` → 0**；另两个 home（invest 4 个、coding 1 个）全部无 model，跟随主模型。
 2. ~~两条验证会话 `20261011_163145_efbf8d`、`20261011_163323_c17162` 可删~~ → **已删**（`hermes sessions delete <id> --yes` ×2，`sessions list` 复查 0 命中）。
 3. `~/.hermes/config.yaml` 的 `custom_providers[name=bailian]`（qwen3.8 时代的 `sk-sp-H.…`）已无引用；是否清理凭据**仍未动**（删凭据不可逆，等你明确）。
 
