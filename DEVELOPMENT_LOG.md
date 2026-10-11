@@ -4,6 +4,105 @@
 
 ---
 
+## 2026-10-11（第二十九轮）: 上游同步至 `a62979dc36`（1182 → 0）—— 3 冲突（aux strip / main.ts pool-limits / dingtalk imports），overlay-completeness × 私有 i18n key 相撞修复 + 7 新失败单跑全过（负载型）
+
+### 背景（同步前数字）
+
+| 项 | 值 |
+|---|---|
+| 同步前 behind / ahead | **1171 / 122**（初测对 `f925b01791`；最终 fetch 后实合并上游 **1182** 提交；ahead = 历轮私有 + round 28 合并与日志） |
+| 上游范围 | **3955 文件，+67179 / −38415**（三点 diff） |
+| 上游 tip | `a62979dc36`（2026-10-10 20:18 +0530，`fix(compression): a refused candidate's attempt record claims no effect`） |
+| 稳定 tag | `SYNCED v2026.9.24`（9.24 后仅 rc/canary 流水线；本轮**用户主动发起**） |
+| 热点目录 | `apps/desktop` 907、`tests/hermes_cli` 589、`tests/gateway` 364、`tests/agent` 364、`tests/tools` 324、`website/docs` 183、`optional-skills` 130、`plugins/platforms` 113、`gateway/platforms` 89 |
+
+### 流程（R2）
+
+1. **预检**：工作区干净，`main == fork/main`（`599a392df0`）。记下 **gateway PID 2260088（active/running，NRestarts=0，7 profiles）**、**webui PID 2260089**、electron 未运行。
+2. **回滚包（R12）**：`/tmp/rb/20261010-234448`（`.env` + `config.yaml` + 7 profile 份 + `unit.service` + `unit-webui.service` + `gateway_state.json` + `state.txt`，19 项）。
+3. `git merge-tree` 预演 **3 冲突** → 实跑 `git merge origin/main --no-edit` 同样 **3 冲突**，合并提交 **`1f03782ca8`**。
+4. R5 → R6 → 全串行验证链（`/tmp/sync/chain29.sh`，`setsid nohup`，日志 `/tmp/sync29/`）→ 新失败单跑定性（`/tmp/sync/singles29.sh`）→ i18n 修复提交 `9ca458212e` → 本日志 → 推送 → 服务重启。
+
+### 冲突与取舍（3 个）
+
+| 文件 | 冲突内容 | 取舍 |
+|---|---|---|
+| `agent/auxiliary_client.py` | 我方 `reasoning_content` 剥离块（`267688b48d`，fork 私有）+ `kwargs: Dict[...]` vs 上游 lint 风格 `kwargs: dict[...]` | **保私有剥离块**（R5 证实 BASE/origin 均无此块）；类型注解**取上游** `dict[str, Any]` |
+| `apps/desktop/electron/main.ts` | 我方 `selectPoolEvictions` import + `POOL_LIMITS_MIN` vs 上游去掉 `POOL_LIMITS_MIN` | **保 `selectPoolEvictions`**（R4，line 12009 使用中）；**取上游** pool-limits import（`POOL_LIMITS_MIN` 在 main.ts 已无引用） |
+| `plugins/platforms/dingtalk/adapter.py` | 我方 `from pathlib import Path` vs 上游 `datetime, timezone, UTC` | **并集**：`from datetime import datetime, timezone, UTC` + `from pathlib import Path`（两侧均在使用：UTC 537/539/702，Path 609/626） |
+
+### R5 逐行存活校验（脚本 `/tmp/sync/verify_private.py`）
+
+```
+BASE=f26a0949a413  REF=599a392df0
+files_with_private_changes=47
+added_lines_checked=2373
+relocated_to_new_modules=0
+expected_rewrites_whitelisted=0
+missing_total=0
+```
+
+### R6 语义复核（7 个重叠文件，全部过）
+
+- **`gateway/run_turn.py`**：`message_text` 2265 行赋值（`prepared.history, prepared.message_text` 解包，上游 2138 prepare 在前）→ 2346 行 `bridge_user_msg=message_text`（同函数、赋值在前 ✓）；`response` 2344-2345 footer 追加后传入 hooks = **silence 判定后的值** ✓。
+- **`hermes_cli/main_desktop.py`**：`config_electron_flags` 1612 赋值 → 1651 返回 → 1761 解包 → source 1875 / packaged 1883 / bundled 2029 三路贯通 ✓；`HERMES_DESKTOP_HERMES` setdefault 1650 ✓。
+- **`tests/hermes_cli/test_gui_command.py`**：`_prepare_source_launch_tree` 1236 + 2 个 electron_flags 用例（1256/1288）✓。
+- **`agent/auxiliary_client.py`**：`reasoning_content` 剥离 6746-6758（冲突解决后）✓。
+- **`apps/desktop/electron/main.ts`**：`selectPoolEvictions` import 436 + 使用 12009 ✓。
+- **`apps/desktop/src/i18n/*`**：上游本波新增 `overlay-completeness.test.ts` 与我方 2 个 pool 饱和 key 相撞，**已修复**（见失败定性）。
+- **`plugins/platforms/dingtalk/adapter.py`**：`from agent.i18n import t` 52、`_load_contacts` 149、`_save_contact` 158、`_standalone_send` 880 ✓；`_PLUGIN_COMPAT` 0 命中 ✓。
+
+R4 三文件全在、`selectPoolEvictions` 2 处、**npm ci 之后** render-loop 补丁仍在（patchcheck=1）；R7 探针 `('_handle_bridge_command', True) 44` 精确命中；冲突标记全树 **0**。
+
+
+### 验证结果（全串行，R3；日志 `/tmp/sync29/`）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home，9 目录常规集，-j 12） | **5125 文件 / 53610 passed / 22 failed / 796 skipped**（2954.0s） |
+| 2 | `uv lock --check`（PM uv 0.12.3） | **rc=0** |
+| 3 | 依赖层 | `pyproject`/`uv.lock`/`pm/lock.json` 有变 → **`hermes pm install` rc=0** |
+| 4 | npm 依赖 | **`package.json`/`package-lock.json` 有变 → `npm ci` rc=0**（round 28 无需、本轮必须）；postinstall 后 render-loop 补丁命中 1 ✓ |
+| 5 | typecheck | desktop / ui-tui / web **全 rc=0**（i18n 修复后 desktop 复跑再 rc=0） |
+| 6 | **eslint**（R3 门槛） | desktop `src/ electron/ --quiet` **0 error 行**；ui-tui / web **rc=0** |
+| 7 | i18n keys | ui-tui `i18n:keys:check` rc=0；desktop `i18n-keys.mjs --check` **verified**（修复后复跑 rc=0） |
+| 8 | 定向 vitest（i18n + store + pool-eviction，192 文件 / 2129 测试） | 修复前 3 failed（overlay 1 + voice-prefs 2）→ **修复后复跑仅 voice-prefs ×2**（既有基线），2127 passed |
+| 9 | electron vitest（project electron，373 文件 / 3652 测试） | **3 文件 / 4 failed** = round 28 基线（`mac-sign` ×2、`backend-probes-runtime`、`source-backend`） |
+| 10 | ui-tui vitest（`build:ink` 先行 ✓） | **178 文件 / 1624 全过** |
+| 11 | web vitest | **61 文件 / 429 全过** |
+| 12 | builds | ui-tui / web（`web_dist`）/ desktop（`dist`）**全 rc=0** |
+
+### 失败定性（22 pytest failed + 4 未跑 + electron 4 + voice-prefs 2；**本轮引入的回归 = 0**）
+
+**pytest 22 failed 拆解**：
+- **round 28 已知基线 15**：`git_pack_tidy`（git 2.43 环境型）、`gateway_service`、`pty_bridge`、`process_registry_pty_kill`、`inventory_pricing`、`shared_profile_warning` ×2、`bot_desktop_browser`、`bot_relay_windows_paths`、`termux_api_detection`、`voice_mode`、`voice_wsl_pipewire`、`web_keyless_fallback` ×2、`posix_handoff_protocol`（round 28 FLAKY）。
+- **新候选 7 → `singles29.sh` 单跑 7/7 rc=0 → 负载型 flaky**：`restart_safe_worker_death_evidence`、`active_sessions`、`update_lock`、`delegate_capacity_interrupt` ×2、`posix_marker`、`slash_worker_mcp_discovery`。
+- **4 未跑 = round 28 基线**：`desktop_build_lock`（既有卡死）、`fal_sdk`（缺 extra 收集错）、`fresh_source_install`（时长 E2E）、`icon_flavors`（上游卡死）。
+- round 28 有本轮消失：`openviking_provider`、`update_pause`、`codex_ttfb_watchdog`、`model_options_account_usage`。
+
+**vitest 唯一真冲突（已修复）**：上游本波新增 `src/i18n/overlay-completeness.test.ts`（overlay 未翻译 key ratchet），我方 2 个私有 key `boot.errors.localBackendPoolSaturated(+Detail)` 在 **de/es/fr** 三个 locale overlay 缺失 → 6 gap 报红。修复 = `de_boot.ts`/`es_boot.ts`/`fr_boot.ts` 各补 2 key 的本地化译文（`9ca458212e`）；**不动** `overlay-gaps.json` ratchet（翻译补齐优于进白名单）。修复后 overlay 测试 1 passed、i18n-keys verified、typecheck rc=0。
+
+### 下次同步的注意点
+
+1. **新起算点**：下次 `BASE` = `a62979dc36`。
+2. **overlay-completeness 是 ratchet 测试**：以后每加私有 i18n key，必须同步补全 **8 个 locale overlay**（ar/de/es/fr/ja/ru/zh/zh-hant），否则该测试报红；或按其 docstring `OVERLAY_GAPS_UPDATE=1` 进白名单（优先补翻译）。
+3. **本轮 lockfile 双变**（`package-lock.json` + `uv.lock`）→ 验证链**必须**含 `npm ci` + `hermes pm install`；下次先看 `git diff --stat` 再定。
+4. **新失败负载型名单**（单跑即过，勿误判回归）：`restart_safe_worker_death_evidence`、`active_sessions`、`update_lock`、`delegate_capacity_interrupt`、`posix_marker`、`slash_worker_mcp_discovery`。
+5. 终端 shell 集成挂死/回执错乱**连续第四轮**：对策不变（`setsid nohup` + 文件日志 + `read_files` 轮询）。
+
+### 待办
+
+1. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 起延续）。
+2. **`voice-prefs.test.ts` 2 失败未修**（jsdom mock 语义，延续）。
+3. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
+4. **`hermes update` 的 pack tidy 在本机 git 2.43 报错**（上游用 ≥2.44 语法；改主机 git 属环境变更，未自动做）。
+5. `test_pty_bridge` / `test_process_registry_pty_kill` / `test_icon_flavors` 等上游/WSL 环境型失败未在本 fork 修复（等上游动或单独提 issue/PR）。
+6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**——微信桥是用户正在用的通道。重启后复核：gateway `active/running`、`NRestarts=0`、webui active、`gateway_state` 7 profiles 全在。
+7. **`session_reset.mode` 语义变更（round 28 遗留）**：fitness/invest/music/work 4 个 profile 的 `both` 配置会在启动时告警失效；如需保留 idle/daily 重置装 `hermes-session-reset-policy` 插件。未自动做——改 profile 语义属用户决策。
+8. 重启后微信侧 home-channel 启动通知报 `iLink sendmessage session not ready` 属预期瞬态（round 28 记录）。
+
+---
+
 ## 2026-10-07（第二十八轮）: 上游同步至 `f26a0949a413`（1768 → 0）—— 2 冲突（boot 文案拆模块），xiaomi wire 快照收录私有特性 + 4 项上游/环境失败定性（纯上游 worktree 实证）
 
 ### 背景（同步前数字）
