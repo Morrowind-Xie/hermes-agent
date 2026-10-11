@@ -53,7 +53,7 @@ R4 三文件全在、`selectPoolEvictions` 2 处、**postinstall 补丁调用仍
 |---|---|---|
 | 1 | **pytest**（隔离 dev home，9 目录常规集，-j 12） | **5133 文件 / 53679 passed / 18 failed / 796 skipped**（2938.0s） |
 | 2 | `uv lock --check`（PM uv 0.12.3） | `Resolved 328 packages` 无错误 ✓ |
-| 3 | npm 依赖 | **`npm ci` 真实失败（EBADENGINE，见发现 2）→ node_modules 未刷新**；patchcheck=1（补丁为 round 28 遗留，仍在） |
+| 3 | npm 依赖 | **`npm ci` 被 EBADENGINE 硬门挡住（见发现 2）**；**当日已用 `npm ci --engine-strict=false` 补齐（added 1345 packages，postinstall 补丁重打成功）**，并在新 node_modules 上复核：eslint 10.12.0 / tsc 6.0.3 / lefthook 2.1.14、render-loop 补丁命中 1、desktop `typecheck rc=0`、ui-tui/web typecheck 0 error、desktop eslint **0 error**、overlay-completeness 1 passed、pool-eviction 9 passed、i18n keys verified ✓ |
 | 4 | typecheck | desktop / ui-tui / web 日志均仅 header、**0 error** ✓ |
 | 5 | **eslint**（R3 门槛） | desktop **0 error 行**；ui-tui `0 errors, 2 warnings`；web `0 errors, 28 warnings`（均基线）✓ |
 | 6 | i18n keys | ui-tui `fresh (1259 keys)`；desktop `verified` ✓ |
@@ -74,7 +74,11 @@ R4 三文件全在、`selectPoolEvictions` 2 处、**postinstall 补丁调用仍
 ### 本轮两大发现（流程级，务必记住）
 
 1. **`chain*.sh` 的 `run()` 有 rc 捕获 bug**：`echo "... rc=$?"` 里 `$(date +%T)` 先于 `$?` 展开，把退出码覆盖成 0 —— **round 28/29/30 的所有 `DONE rc=0` 都是假的**（round 28 已撞见其表象"vitest rc 不可信"）。模板已修：`local rc=$?` 在任何命令替换**之前**捕获。**今后判定一律先读日志内容，rc 只作参考。**
-2. **`npm ci` 自 round 29 起就一直失败（被 bug 掩盖）**：上游 `.npmrc` 设 `engine-strict=true`，`engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16 band —— 那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`，会把 .npmrc 豁免包按 14 天门拦成 ETARGET）。本机 npm **11.12.1 正落在排除带** → EBADENGINE 硬失败。**解法 = 主机 npm 升级到 ≥11.17.0 后补跑 `npm ci`**（属工具链升级，按 git 2.43 先例**未自动做**）。影响：`node_modules` 与 lockfile 有漂移（eslint 10.12.0 / typescript 6.0.3 等 devDeps），本轮 lint/typecheck/vitest 是在旧 node_modules 上跑的——内容全过但**不代表新依赖已装**，升级后需重跑。
+2. **`npm ci` 被 engines 硬门挡住 —— 但"必须升级 npm"是错的，实测有三条路**：上游 `.npmrc` 设 `engine-strict=true`，`engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16 band —— 那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`，会把 .npmrc 豁免包按 14 天门拦成 ETARGET）。本机全局 npm **11.12.1 正落在排除带** → 硬失败。**三条可行路径（按合规度排序）**：
+   - **(A) 用已在的 nvm Node 22.22.0**：`~/.nvm/versions/node/v22.22.0/bin/npm` = **10.9.4（<11.10.0）**，node 22.22.0 也满足 `^22.22.0` → **完全合规、零升级**；代价是 npm 操作都要切到该 node。
+   - **(B) 升级全局 npm 到 ≥11.17.0**（当前 registry 最新 = 12.2.0，engines 也接受 ≥12）：上游意图路径，一次到位；改动 `/usr/local/lib/node_modules/npm`。
+   - **(C) 应急绕过**：`npm ci --engine-strict=false` —— **当日已用它跑通（added 1345 packages、补丁重打、新树复核全过）**。前提是 `.npmrc` 的 `min-release-age=14` 目前处于**注释**状态，11.12.1 的那个缺陷才不会触发；**上游一旦重新启用它，11.12.1 会踩 ETARGET，届时必须走 A 或 B**。
+   - 结论：**不是必须升级**；本轮依赖层已用 (C) 对齐并复核通过，(A)/(B) 留作长期方案。
 
 ### 下次同步的注意点
 
@@ -86,7 +90,7 @@ R4 三文件全在、`selectPoolEvictions` 2 处、**postinstall 补丁调用仍
 
 ### 待办
 
-1. **主机 npm 升级到 ≥11.17.0**（如 `npm install -g npm@latest`）→ 补跑 `npm ci` → **重跑 lint / typecheck / vitest**（devDeps 漂移风险）。未自动做 —— 改主机工具链属环境变更（同 git 2.43 先例）。
+1. ~~**主机 npm 升级到 ≥11.17.0**~~ → **已改为三选一（见发现 2）**：本轮依赖层已用 `npm ci --engine-strict=false` 对齐并复核通过（1345 包、补丁重打、typecheck/eslint/vitest/i18n 全过）。**长期方案**：(A) 切 nvm Node 22.22.0（npm 10.9.4，天然合规，零环境变更）或 (B) 升级全局 npm 到 ≥11.17.0；**若上游重新启用 `.npmrc` 的 `min-release-age=14`，本机 11.12.1 将踩 ETARGET，届时必须走 A/B**。
 2. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 起延续）。
 3. **`voice-prefs.test.ts` 2 失败未修**（jsdom mock 语义，延续）。
 4. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
