@@ -4,6 +4,98 @@
 
 ---
 
+## 2026-10-11（第三十轮）: 上游同步至 `1f2b9e0864`（103 → 0，**0 冲突**）—— run() rc 捕获 bug 揪出 + `npm ci` 被 EBADENGINE 硬门挡住（node_modules 未刷新，记待办）
+
+### 背景（同步前数字）
+
+| 项 | 值 |
+|---|---|
+| 同步前 behind / ahead | **103 / 126**（ahead 含 fork CI 的 `3f66b2d72b` fmt 提交，预检已 `--ff-only` 收下） |
+| 上游范围 | **859 文件，+5389 / −1821**（三点 diff；几乎全在 `tests/*`，生产代码量很小） |
+| 上游 tip | `1f2b9e0864`（2026-10-10 19:22 -0700，`test: LSP hard-kill test no longer races its own cleanup`） |
+| 稳定 tag | `SYNCED v2026.9.24`（无新稳定 tag；本轮**用户主动发起**） |
+| 热点目录 | `tests/hermes_cli` 126、`tests/scripts` 100、`tests/tools` 65、`tests/agent` 52、`tests/e2e` 49、`tests/pm` 47、`apps/desktop` 45、`tests/gateway` 33 |
+
+### 流程（R2）
+
+1. **预检**：工作区干净；`main` 落后 `fork/main` 1 笔（fork CI `github-actions[bot]` 的 `fmt(js): npm run fix on merge (#3)` = `3f66b2d72b`，16 文件 prettier 格式化含我方 `fr_boot.ts`）→ `git merge --ff-only fork/main` 收下，`main == fork/main`。记下 **gateway PID 2075056（active/running，NRestarts=0，7 profiles）**、**webui PID 2075393**、electron 未运行。
+2. **回滚包（R12）**：`/tmp/rb/20261011-131305`（19 项）。
+3. `git merge-tree` 预演 **0 冲突** → 实跑 `git merge origin/main --no-edit` **0 冲突自动合并**，合并提交 **`67eff30a93`**；冲突标记全树 0。
+4. R5 → R6 → 全串行验证链（`/tmp/sync/chain30.sh`，`setsid nohup`，日志 `/tmp/sync30/`）→ 新失败单跑定性（`singles30.sh`）→ 纯上游 worktree 对照（`/tmp/upcheck30`）→ 本日志 → 推送 → 服务重启。
+
+### R5 逐行存活校验（脚本 `/tmp/sync/verify_private.py`）
+
+```
+BASE=a62979dc36  REF=3f66b2d72b
+files_with_private_changes=60
+added_lines_checked=2426
+relocated_to_new_modules=0
+expected_rewrites_whitelisted=0
+missing_total=0
+```
+
+### R6 语义复核（7 个重叠文件，全部过；本轮 0 冲突仍逐项 grep）
+
+- **`gateway/run_turn.py`**：`message_text` 2265 赋值 → 2346 `bridge_user_msg=message_text`（同函数、赋值在前 ✓）；response = silence 判定后值 ✓。
+- **`hermes_cli/main_desktop.py`**：`HERMES_DESKTOP_HERMES` setdefault 1650 ✓；`config_electron_flags` 三路贯通 ✓。
+- **`tests/hermes_cli/test_gui_command.py`**：electron_flags 3 命中 ✓。
+- **`agent/auxiliary_client.py`**：`reasoning_content` 剥离 6746 ✓。
+- **`apps/desktop/electron/main.ts`**：`selectPoolEvictions` import 436 + 使用 12009 ✓。
+- **`apps/desktop/src/i18n/*`**：round 29 补的 de/es/fr pool 饱和 key 仍在（CI fmt 只动了 `fr_boot.ts` 格式）；overlay-completeness 定向 vitest 过 ✓。
+- **`plugins/platforms/dingtalk/adapter.py`**：`t` 52、`_load_contacts` 149、`_save_contact` 158、`_standalone_send` 880→1029 ✓。
+
+R4 三文件全在、`selectPoolEvictions` 2 处、**postinstall 补丁调用仍在**（`package.json:14`）；R7 探针 `('_handle_bridge_command', True) 44` 精确命中。
+
+
+### 验证结果（全串行，R3；日志 `/tmp/sync30/`；**rc 字段本轮不可信，判定全部读日志内容**——见下方发现 1）
+
+| # | 项目 | 结果（内容性判定） |
+|---|---|---|
+| 1 | **pytest**（隔离 dev home，9 目录常规集，-j 12） | **5133 文件 / 53679 passed / 18 failed / 796 skipped**（2938.0s） |
+| 2 | `uv lock --check`（PM uv 0.12.3） | `Resolved 328 packages` 无错误 ✓ |
+| 3 | npm 依赖 | **`npm ci` 真实失败（EBADENGINE，见发现 2）→ node_modules 未刷新**；patchcheck=1（补丁为 round 28 遗留，仍在） |
+| 4 | typecheck | desktop / ui-tui / web 日志均仅 header、**0 error** ✓ |
+| 5 | **eslint**（R3 门槛） | desktop **0 error 行**；ui-tui `0 errors, 2 warnings`；web `0 errors, 28 warnings`（均基线）✓ |
+| 6 | i18n keys | ui-tui `fresh (1259 keys)`；desktop `verified` ✓ |
+| 7 | 定向 vitest（i18n + store + pool-eviction，192 文件 / 2130 测试） | **仅 `voice-prefs` ×2**（既有基线），2128 passed；overlay-completeness ✓ |
+| 8 | electron vitest（373 文件 / 3652 测试） | **4 failed = round 29 基线原样**（`mac-sign` ×2、`backend-probes-runtime`、`source-backend`） |
+| 9 | ui-tui vitest | **178 文件 / 1624 全过** |
+| 10 | web vitest | **61 文件 / 429 全过** |
+| 11 | builds | ui-tui `entry.js` ✓ / web `built in 4.49s` ✓ / desktop 除既有 `X11/Xlib.h` 降级外无致命错 ✓ |
+
+### 失败定性（18 pytest failed + 4 未跑 + electron 4 + voice-prefs 2；**合并回归 = 0**）
+
+- **已知基线 12**：`git_pack_tidy`、`gateway_service`、`inventory_pricing`、`pty_bridge`、`bot_desktop_browser`、`bot_relay_windows_paths`、`process_registry_pty_kill`、`termux_api_detection`、`voice_wsl_pipewire`、`voice_mode`、`web_keyless_fallback` ×2。
+- **`update_pause_record` ×2 → 纯上游 worktree（`/tmp/upcheck30` @ `1f2b9e0864`）复跑同样 40 passed / 2 failed → 上游/环境型，非回归**（`identity_is_live` 断言 + `/var/tmp` Permission denied 路径，两树失败模式逐字一致）。注意：round 28 该文件单跑曾全过，本轮单跑仍败 —— 上游本波改了 `pause_record` 相关行为。
+- **新候选 3 文件单跑 3/3 全过 → 负载型 flaky**：`test_lazy_secrets_dispatch`（6✓）、`test_kanban_db`（54✓）、`test_startup_fast_guards`（12✓）。
+- **4 未跑 = 基线**：`desktop_build_lock`（卡死）、`fal_sdk`（缺 extra）、`icon_flavors`（300s SIGKILL）、`fresh_source_install`（300s SIGKILL）。
+- **较 round 29 消失**：`shared_profile_warning`、`restart_safe_worker_death_evidence`、`active_sessions`、`update_lock`、`delegate_capacity_interrupt`、`posix_marker`、`slash_worker_mcp_discovery`（后者均负载型）。
+
+### 本轮两大发现（流程级，务必记住）
+
+1. **`chain*.sh` 的 `run()` 有 rc 捕获 bug**：`echo "... rc=$?"` 里 `$(date +%T)` 先于 `$?` 展开，把退出码覆盖成 0 —— **round 28/29/30 的所有 `DONE rc=0` 都是假的**（round 28 已撞见其表象"vitest rc 不可信"）。模板已修：`local rc=$?` 在任何命令替换**之前**捕获。**今后判定一律先读日志内容，rc 只作参考。**
+2. **`npm ci` 自 round 29 起就一直失败（被 bug 掩盖）**：上游 `.npmrc` 设 `engine-strict=true`，`engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16 band —— 那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`，会把 .npmrc 豁免包按 14 天门拦成 ETARGET）。本机 npm **11.12.1 正落在排除带** → EBADENGINE 硬失败。**解法 = 主机 npm 升级到 ≥11.17.0 后补跑 `npm ci`**（属工具链升级，按 git 2.43 先例**未自动做**）。影响：`node_modules` 与 lockfile 有漂移（eslint 10.12.0 / typescript 6.0.3 等 devDeps），本轮 lint/typecheck/vitest 是在旧 node_modules 上跑的——内容全过但**不代表新依赖已装**，升级后需重跑。
+
+### 下次同步的注意点
+
+1. **新起算点**：下次 `BASE` = `1f2b9e0864`。
+2. **先修 chain 的 `run()` rc bug**（已改 `/tmp/sync/chain30.sh` 模板：`local rc=$?` 先捕获）；判定仍以日志内容为准。
+3. **npm ci 的前置条件**：主机 npm ≥11.17.0；没升级前 `npm ci` 步骤预期失败，别再误判成"成功"。
+4. **fork CI（`github-actions[bot]`）会在每次 push 后自动提 `fmt(js): npm run fix`**：预检若见 `main` 落后 `fork/main`，先 `git merge --ff-only fork/main` 收下再合并上游（本轮即如此）。
+5. **`update_pause_record` 单跑已不再全过**（上游本波改动 `pause_record`），失败模式以上游 worktree 为准。
+
+### 待办
+
+1. **主机 npm 升级到 ≥11.17.0**（如 `npm install -g npm@latest`）→ 补跑 `npm ci` → **重跑 lint / typecheck / vitest**（devDeps 漂移风险）。未自动做 —— 改主机工具链属环境变更（同 git 2.43 先例）。
+2. **`test_desktop_build_lock.py` 既有卡死未修**（round 24 起延续）。
+3. **`voice-prefs.test.ts` 2 失败未修**（jsdom mock 语义，延续）。
+4. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
+5. `test_pty_bridge` / `test_process_registry_pty_kill` / `test_icon_flavors` / `update_pause_record` 等上游/环境型失败未在本 fork 修复（等上游动或单独提 issue/PR）。
+6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**；重启后复核 gateway `active/running`、`NRestarts=0`、webui active、`gateway_state` 7 profiles 全在（执行结果见下方附记）。
+7. **`session_reset.mode` 语义变更（round 28 遗留）** 与微信 `iLink sendmessage session not ready` 瞬态：见 round 29 待办 7/8，仍未动（属用户决策/预期瞬态）。
+
+---
+
 ## 2026-10-11（第二十九轮）: 上游同步至 `a62979dc36`（1182 → 0）—— 3 冲突（aux strip / main.ts pool-limits / dingtalk imports），overlay-completeness × 私有 i18n key 相撞修复 + 7 新失败单跑全过（负载型）
 
 ### 背景（同步前数字）
