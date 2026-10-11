@@ -97,7 +97,7 @@ R4 三文件全在、`selectPoolEvictions` 2 处、**npm ci 之后** render-loop
 3. **desktop（electron-builder）打包未跑**（第十九轮口径延续）。
 4. **`hermes update` 的 pack tidy 在本机 git 2.43 报错**（上游用 ≥2.44 语法；改主机 git 属环境变更，未自动做）。
 5. `test_pty_bridge` / `test_process_registry_pty_kill` / `test_icon_flavors` 等上游/WSL 环境型失败未在本 fork 修复（等上游动或单独提 issue/PR）。
-6. **服务重启只动 systemd（gateway / webui），不碰微信桥 / TUI 进程**——微信桥是用户正在用的通道。重启后复核：gateway `active/running`、`NRestarts=0`、webui active、`gateway_state` 7 profiles 全在。
+6. ~~**服务重启只动 systemd（gateway / webui）**~~ **已于 2026-10-11 09:49 执行并验活**：只用 `systemctl --user restart`（未走 `hermes gateway restart`，unit 未被重写）。gateway `active/running` **MainPID=2075056、NRestarts=0**，webui `active/running` MainPID=2075393、NRestarts=0；`gateway_state` = **7 profiles**（default/coding/exam/fitness/invest/music/work）全在。启动日志告警全为已知项：`session_reset.mode both` ×7（见待办 7）、微信 `iLink sendmessage session not ready`（见待办 8）、`tdx` MCP server 缺 `venv/bin/eltdx-mcp` 可执行文件（环境缺件，WARNING 不致命，与本轮合并无关）。微信桥 / TUI 进程未动。
 7. **`session_reset.mode` 语义变更（round 28 遗留）**：fitness/invest/music/work 4 个 profile 的 `both` 配置会在启动时告警失效；如需保留 idle/daily 重置装 `hermes-session-reset-policy` 插件。未自动做——改 profile 语义属用户决策。
 8. 重启后微信侧 home-channel 启动通知报 `iLink sendmessage session not ready` 属预期瞬态（round 28 记录）。
 
