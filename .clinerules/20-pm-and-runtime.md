@@ -113,4 +113,21 @@ ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open
 
 **排查口诀**：看到 `pydantic_core._pydantic_core` / `mcp` / `_cffi_backend` 缺失的报错，**先查启动命令的解释器版本**，不要去 pip 装包。
 
+## R14 · JS 依赖安装固定走 nvm Node 22.22.0（2026-10-11 定案）
+
+**背景**：上游 `.npmrc` 设 `engine-strict=true`，`package.json` 的 `engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16：那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`）。本机全局 `/usr/local/bin/npm` 是 **11.12.1 → 落在排除带**，`npm ci` 一律 `EBADENGINE` 硬失败。nvm 里的 **Node 22.22.0 自带 npm 10.9.4**（`<11.10.0` 分支）且 node 也满足 `^22.22.0` → **完全合规、零升级**。
+
+**规则**：凡 `npm ci` / `npm install` 类**安装**动作，前置 PATH：
+
+```bash
+PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm ci     # rc=0，零 EBADENGINE
+```
+
+**区分（重要）**：engine 门只管 `npm` 自身；**运行时工具（eslint / tsc / vitest / vite build）用默认 node 24.13 完全合规**（`engines.node` 收 `^24.11.0`），无需切换。lefthook 的 pre-commit 也不受影响。
+
+**实测（2026-10-11）**：node22 + npm 10.9.4 下 `npm ci` = added 1345 packages / 36s / `rc=0`，postinstall 的 render-loop 补丁 `applied`；随后 desktop `typecheck rc=0`、desktop `eslint --quiet rc=0`、overlay-completeness + pool-eviction `10 passed`、ui-tui/web typecheck 0 error、`i18n-keys --check verified` 全过。
+
+**Fallback**（node22 不可用时）：`npm ci --engine-strict=false`（本机 npm 11.12.1 可用）——**前提是 `.npmrc` 的 `min-release-age=14` 仍处于注释状态**；上游一旦重新启用它，11.12.1 会踩 ETARGET，届时**必须**回到 node22 路径或升级全局 npm 到 ≥11.17.0。
+
+
 **不要点桌面端的 "Install Hermes locally"**：它跑官方 `install.sh` 分阶段流程，会克隆**上游**仓库到 `~/.hermes/hermes-agent`（不是本 fork），留成半成品后会让桌面端一直卡在首次运行界面（2026-09-26 已发生一次，清除见第九轮日志）。

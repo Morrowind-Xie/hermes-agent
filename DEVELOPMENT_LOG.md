@@ -88,6 +88,14 @@ R4 三文件全在、`selectPoolEvictions` 2 处、**postinstall 补丁调用仍
 4. **fork CI（`github-actions[bot]`）会在每次 push 后自动提 `fmt(js): npm run fix`**：预检若见 `main` 落后 `fork/main`，先 `git merge --ff-only fork/main` 收下再合并上游（本轮即如此）。
 5. **`update_pause_record` 单跑已不再全过**（上游本波改动 `pause_record`），失败模式以上游 worktree 为准。
 
+### 定案（2026-10-11 15:52）：JS 依赖安装走 **nvm Node 22.22.0**（选项 A，零升级）
+
+用户选定 (A)。实测：`PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm ci` → **零 EBADENGINE、`rc_ci=0`、added 1345 packages / 36s**，postinstall 补丁 `applied to @assistant-ui/core`。随后在 node22 + npm 10.9.4 的新树上复核（真实 rc）：eslint 10.12.0 / tsc 6.0.3、补丁命中 1、desktop **`typecheck rc=0`**、desktop **`eslint --quiet rc=0`**、overlay-completeness + pool-eviction **10 passed**、ui-tui/web typecheck 0 error、`i18n-keys --check verified`。
+
+**区分要点**：engine 门只管 `npm` 自身；运行时工具（eslint/tsc/vitest/vite/builder）用默认 node 24.13 完全合规（`engines.node` 收 `^24.11.0`），**无需切换**。
+
+已固化到规则：`.clinerules/20-pm-and-runtime.md` **R14**（用法 + 背景 + fallback），`.clinerules/00-upstream-sync.md` R2 步骤 6 引用之。
+
 ### 待办
 
 1. ~~**主机 npm 升级到 ≥11.17.0**~~ → **已改为三选一（见发现 2）**：本轮依赖层已用 `npm ci --engine-strict=false` 对齐并复核通过（1345 包、补丁重打、typecheck/eslint/vitest/i18n 全过）。**长期方案**：(A) 切 nvm Node 22.22.0（npm 10.9.4，天然合规，零环境变更）或 (B) 升级全局 npm 到 ≥11.17.0；**若上游重新启用 `.npmrc` 的 `min-release-age=14`，本机 11.12.1 将踩 ETARGET，届时必须走 A/B**。

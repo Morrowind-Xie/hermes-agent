@@ -34,7 +34,7 @@ git merge-base --is-ancestor "$tag" HEAD && echo "SYNCED  $tag" || echo "NEW STA
 3. **合并**：`git merge origin/main --no-edit`，逐文件解冲突（原则见 `10-fork-private-deltas.md`）。
 4. **逐行存活校验**（R5，不可省）：确认本地私有改动没被静默丢弃。
 5. **语义复核**：按 `10-fork-private-deltas.md` 的重叠文件清单逐个查（**零文本冲突 ≠ 零复核**）。
-6. **全串行验证链**：pytest → `uv lock --check` →（如需要）`npm ci` → `typecheck` → **`eslint`** → 定向 vitest →（如需要）web build → desktop build。
+6. **全串行验证链**：pytest → `uv lock --check` →（如需要）`npm ci`（**前置 `PATH=$HOME/.nvm/versions/node/v22.22.0/bin:$PATH`，见 `20-pm-and-runtime.md` R14**）→ `typecheck` → **`eslint`** → 定向 vitest →（如需要）web build → desktop build。
 7. **写日志 + 推送**：`DEVELOPMENT_LOG.md` 顶部新增条目，然后 `git push fork main`。
 
 ## R3 · 验证节奏与不可跳过的项
