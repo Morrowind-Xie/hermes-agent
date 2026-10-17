@@ -29,10 +29,7 @@ export const enBoot = {
       gatewaySignInRequired: 'Your remote Hermes signed you out',
       gatewaySignInRequiredDetail: 'Sign in again to reconnect. Your chats and settings are safe.',
       signInAgain: 'Sign in again',
-      ipcBridgeUnavailable: "Hermes Desktop couldn't talk to its own background layer. Restart the app.",
-      localBackendPoolSaturated: 'Local agent limit reached',
-      localBackendPoolSaturatedDetail:
-        'Every local backend slot is busy with profiles you already have open. Close another bot pane, or raise the limit under Settings → Advanced, then open this bot again.'
+      ipcBridgeUnavailable: "Hermes Desktop couldn't talk to its own background layer. Restart the app."
     },
     // Plain causes for a local backend boot failure (`classifyBootFailure`);
     // the raw output stays behind "Show recent logs".

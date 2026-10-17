@@ -198,7 +198,7 @@ class CLIBridgeMixin:
             import os as _os
             try:
                 if platform == "weixin":
-                    from gateway.platforms.weixin import send_weixin_direct
+                    from plugins.platforms.weixin.adapter import send_weixin_direct
                     # Read token/account_id from config.yaml first, fall back to env vars.
                     _token = ""
                     _account_id = ""

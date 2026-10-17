@@ -1,4 +1,5 @@
 import type { TranslationOverrides } from './define-locale'
+import { zhHantSessionCommands } from './zh-hant_session_commands'
 
 export const zhHantBoot = {
   boot: {
@@ -21,10 +22,7 @@ export const zhHantBoot = {
       gatewayConnectionLostDetail:
         'Still retrying in the background. You can keep reading and drafting — open Gateway settings if this persists.',
       gatewaySignInRequired: '需要閘道登入',
-      ipcBridgeUnavailable: '桌面 IPC 橋接器不可用。',
-      localBackendPoolSaturated: '已達本地 Agent 上限',
-      localBackendPoolSaturatedDetail:
-        '所有本地後端槽位都已被你開啟的 profile 佔用。關閉另一個機器人面板，或在「設定 → 進階」中提高上限，然後重新開啟該機器人。'
+      ipcBridgeUnavailable: '桌面 IPC 橋接器不可用。'
     },
     failure: {
       title: 'Hermes 無法啟動',
@@ -61,6 +59,11 @@ export const zhHantBoot = {
     }
   },
 
+  keepAwakeOffer: {
+    title: '電腦在 Hermes 工作時進入了睡眠',
+    message: 'Hermes 可以在工作執行時保持電腦喚醒。螢幕仍會照常關閉，使用電池時電腦仍可能進入睡眠。',
+    action: '執行期間保持喚醒'
+  },
   remoteDisplayBanner: {
     message: reason => `軟體繪圖已啟用 — 偵測到遠端顯示（${reason}）。為防止畫面閃爍，已停用 GPU 加速。`
   },
@@ -73,6 +76,13 @@ export const zhHantBoot = {
       privacy: '隱私權政策',
       after: '約束。'
     }
+  },
+  promptNotices: {
+    legacySendUnconfirmed: '此伺服器無法確認這則訊息先前的傳送，它可能已經執行過。再次傳送前請先查看對話。',
+    mcpReloadDeferred: '此對話正忙：MCP 變更會在目前輪次結束並再次重新載入 MCP 後生效，或在重新開啟對話時生效',
+    mcpReloadNotInChat: server => `此對話未啟用 ${server}`,
+    mcpReloadUnavailable: servers => `未能連線：${servers}`,
+    sessionCommands: zhHantSessionCommands
   },
 
   updates: {
@@ -341,5 +351,5 @@ export const zhHantBoot = {
   }
 } satisfies Pick<
   TranslationOverrides,
-  'boot' | 'remoteDisplayBanner' | 'butterbar' | 'updates' | 'install' | 'onboarding'
+  'boot' | 'remoteDisplayBanner' | 'butterbar' | 'promptNotices' | 'keepAwakeOffer' | 'updates' | 'install' | 'onboarding'
 >

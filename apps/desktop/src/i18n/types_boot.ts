@@ -25,8 +25,6 @@ export interface BootTranslations {
     gatewaySignInRequiredDetail: string
     signInAgain: string
     ipcBridgeUnavailable: string
-    localBackendPoolSaturated: string
-    localBackendPoolSaturatedDetail: string
   }
   causes: {
     exitedEarly: string
