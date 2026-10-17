@@ -4,6 +4,92 @@
 
 ---
 
+## 2026-10-17（第三十二轮）：上游同步至 `798b8bf52b`（4101 commits / 4191 文件）—— 10 冲突 + 本地后端池子系统退役 + 平台适配器插件化
+
+### 背景（可复算）
+
+| 项 | 值 |
+|---|---|
+| 同步前 HEAD | `75ad23aee7`（2026-10-11 21:07 +0800） |
+| 上游 tip | `798b8bf52b`（2026-10-16 23:54 -0400） |
+| behind / ahead | **4101 / 134** |
+| diff | **4191 文件，+332748 / −75738**；上游删除 **117** 文件（`apps/desktop` 62） |
+| 稳定 tag | 最新 `v2026.9.24` 已并入（`v0.22.2` / `rc.N-v0.22.2` / `abandoned-rc.*` / `+canary.*` 按 R1 忽略） |
+| 冲突预演 | `merge-tree --write-tree --name-only` → 10 处，与实跑逐字一致 |
+
+### 流程
+
+1. 回滚包 `/tmp/rb/20261017-121229`（7 home 的 `.env` + `config.yaml` + gateway_state + unit + state.txt）。
+2. **先停 `hermes-gateway` / `hermes-webui`**：上游删了 `gateway/platforms/weixin.py`，在冲突态下 gateway 一旦收到微信消息就崩。
+3. `git merge origin/main --no-edit` → 10 冲突（6 content + 4 modify/delete）。
+
+### 冲突与取舍
+
+| 文件 | 处置 | 理由 |
+|---|---|---|
+| `.npmrc` | 双方合并：保留 `blobatar` exclude，追加上游 `source-map-js` / `http-cache-semantics` / `ip-address` | 上游同时重新启用了 `min-release-age=14`（本地不再是注释态） |
+| `apps/desktop/src/i18n/ja.ts` / `ru.ts` | 取上游 | 上游把 `boot` 拆到 `ja_boot.ts` / `ru_boot.ts`；我们的 delta 只有 pool 饱和文案 |
+| `apps/desktop/src/store/gateway.ts` | 取上游 | 私有 delta（saturation 重试钟）整体依赖被删的 pool 模块 |
+| `apps/desktop/electron/main.ts` | 取上游后重植 IME 报告；**单实例日志补丁退役** | 上游把单实例判定提前到 1254 行，那时 `hermesLog`(1967) / `flushDesktopLogBufferSync`(2122) 尚未初始化（TDZ）；上游已用 `console.error` 输出同一事件 |
+| `gateway/run_turn.py` | 取上游（已拆成 prepare/hygiene/persistence mixin）；bridge 逻辑迁到 `run_turn_persistence.py::_hmwa_post_turn_hooks`（新增 `bridge_user_msg`）+ 调用点 `bridge_user_msg=message_text`；takeover 块重植到新 `_handle_message_with_agent`（`_hmwa_resolve_session` 之前） | `message_text` 在上游 236 行赋值，早于 316 行调用点 |
+| `pool-*`（4 个 modify/delete） | 跟随上游删除 | `c63d465dbc refactor(desktop): remove the dead local-backend pool subsystem` |
+| `pool-eviction.ts` / `.test.ts` / `store/gateway-pool-saturation.test.ts` | **退役** | 私有 backpressure 失去宿主（详见待办） |
+| i18n `*_boot.ts` / `types_boot.ts` / `zh.ts` 的 pool key | 删除（8 文件，共 30 行） | 同上；`locales/_keys.desktop.json` 重新生成（−2 行） |
+
+### 平台适配器插件化（运行时影响最大）
+
+- `gateway/platforms/{weixin,qqbot,signal,yuanbao,whatsapp_cloud,bluebubbles}.py` 等全部删除 → `plugins/platforms/*`。
+- `hermes_cli/cli_bridge_mixin.py:201` 的 `from gateway.platforms.weixin import send_weixin_direct` 改为 `from plugins.platforms.weixin.adapter import send_weixin_direct`（上游新家 `adapter.py:1220` 仍有该函数）。
+- 启动后 `gateway_state.json`：`weixin: connected`、`api_server: connected`、`qqbot: connected`、`dingtalk`（含 5 profile）`connected`。
+
+### 依赖迁移（R8）
+
+- `hermes pm lock` → `uv.lock 已与 pyproject 一致，nothing written`。
+- `hermes pm install` 完成：`httpx2 2.12.0` / `mcp 2.3.0` / `PyJWT 2.15.1` / `urllib3 2.8.0`（`langfuse` extra 已随上游删除）。
+- `npm ci`（`PATH=$HOME/.nvm/versions/node/v22.22.0/bin:$PATH`，npm 10.9.4）：**added 1345 packages / 36s / rc=0**，postinstall render-loop 补丁 `applied to @assistant-ui/core`。
+- 注：`hermes dashboard` 启动时会自己 "Preparing Node dependencies" 重装一回（12:41，`node_modules/.bin` 时间戳可证），装完补丁仍在（命中 1）。
+
+### 验证结果
+
+| 项 | 结果 |
+|---|---|
+| R5 逐行存活 | `files=50 lines_checked=1869 retired_lines=135 moved_lines=18 key_failures=0 **missing_total=0**` |
+| pytest（`scripts/run_tests.sh`，8 文件） | **200 passed / 0 failed / 22 skipped**（跳过为 macos/windows lane） |
+| bridge 探针 | venv(3.12) 与 PM(3.14) 双验 `('_handle_bridge_command', True) 44` |
+| desktop typecheck | `rc=0`（合并后两次；第二次在 i18n 删 key 之后） |
+| desktop eslint `--quiet` | `rc=0`（两次，0 error） |
+| i18n keys | `verified`（重生成后 `--check` rc=0） |
+| 定向 vitest（`src/i18n` + `src/store`） | 197 文件 / 2182 测试：**2179 passed / 3 failed** |
+| web / ui-tui / desktop build | 依次 `rc=0` / `rc=0` / `rc=0` |
+| 服务验活 | gateway + webui `active/running`、`NRestarts=0`、`served_profiles` 7 个、webui `9119 → 200` |
+| 合并提交 | `10063ac998` |
+
+3 个 vitest 失败：`voice-prefs.test.ts` ×2（上一轮日志已记为既有基线）+ `dead-session-prune.test.ts` ×1（`vi.getTimerCount()` 2≠1）。`git log 1f2b9e0864..origin/main -- <这两个文件>` 为空 → **本轮合并未改动它们**；单文件复跑同样稳定失败，失败与本次冲突解决无关（疑似 vitest 4.1.11 升级后的计时断言）。
+
+### 下次同步的注意点
+
+1. **pool 子系统已不存在**：`decideLocalBackendAdmission` / `selectPoolEvictions` / `localBackendSlotsThatMayFree` 在 `origin/main` 的 `apps/desktop` 下均无定义；任何 `pool-spawn-coordinator` / `pool-stop` / `pool-retire` 引用都会编译失败。
+2. **平台适配器全部在 `plugins/platforms/<name>/adapter.py`**：`gateway.platforms.<platform>` 形式的导入在合并后一律断（本轮只修了 weixin 一处）。
+3. **pre-commit 需要 ruff**：本机没有 ruff，`lefthook` 的 `lint python` 会 `sh: ruff: not found`（exit 127）。本轮用 shim：
+   ```bash
+   mkdir -p /tmp/sync4/bin && printf '#!/bin/sh\nexec uvx --from ruff==0.15.10 ruff "$@"\n' > /tmp/sync4/bin/ruff && chmod +x /tmp/sync4/bin/ruff
+   PATH=/tmp/sync4/bin:$PATH git commit --no-edit
+   ```
+4. lefthook 检查的是**全部 staged 文件**；merge 时 4191 文件全部进 index，上游旧代码在 pin 0.15.10 下可能命中 UP 规则（本轮 3 处：我们的 `cli_init_mixin.py` `Optional["threading.Event"]`，以及 dingtalk adapter 私有块里的 `Dict` / `timezone.utc`，已全部改成 `threading.Event` / `dict` / `UTC`）。
+5. 上游把 `session_reset.mode` 改成了插件（`hermes-session-reset-policy`）：7 个 profile 每次启动各 1 条 WARNING，`mode: both` 现在只在 `/new`、`/reset` 生效。
+6. `hermes gateway status` 的 "outdated service definition" 仍是假警报（R9），不要 refresh。
+
+### 待办
+
+1. **pool backpressure 是否重建**（需用户决定）：原实现（descriptor 不占 cap、饱和时 60s±30s 慢钟、拒绝即报错而非排队）在 `main.ts` / `store/gateway.ts` / `i18n` 三处共 135 行，本轮整体退役。若要保留，须在新 `local-gateway*.ts` 架构上重做，无法靠解冲突恢复。
+2. **7 个 profile 的 session_reset 警告**：按提示 `hermes plugins install hermes-session-reset-policy` 可恢复 idle/daily 重置。**未自动执行**：这会改变会话重置策略（用户配置语义），属产品决定。
+3. `voice-prefs` ×2 / `dead-session-prune` ×1 失败需上游确认（本机未改动对应文件）。
+4. **R4 私有文件清单需更新**：`apps/desktop/electron/pool-eviction.ts` 已退役，清单剩 `hermes_cli/cli_bridge_mixin.py` 与 `scripts/patch-assistant-ui-render-loop.mjs`。
+5. `.npmrc` 的 `min-release-age=14` 已由上游重新启用 → R14 的 fallback（npm 11.12.1 + `--engine-strict=false`）**已失效**（会踩 ETARGET），必须走 node22 / npm 10.9.4。
+6. `tdx` MCP 仍缺 `<repo>/venv/bin/eltdx-mcp`（既有遗留，启动日志刷 WARNING）。
+
+---
+
 ## 2026-10-11（第三十一轮）: 主力模型反转 —— `deepseek-flash` 主力 / `mimo-v2.6-pro` 备用（7 home + cron 全量）
 
 ### 需求
