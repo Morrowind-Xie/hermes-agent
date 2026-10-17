@@ -81,12 +81,18 @@
 
 ### 待办
 
-1. **pool backpressure 是否重建**（需用户决定）：原实现（descriptor 不占 cap、饱和时 60s±30s 慢钟、拒绝即报错而非排队）在 `main.ts` / `store/gateway.ts` / `i18n` 三处共 135 行，本轮整体退役。若要保留，须在新 `local-gateway*.ts` 架构上重做，无法靠解冲突恢复。
-2. **7 个 profile 的 session_reset 警告**：按提示 `hermes plugins install hermes-session-reset-policy` 可恢复 idle/daily 重置。**未自动执行**：这会改变会话重置策略（用户配置语义），属产品决定。
-3. `voice-prefs` ×2 / `dead-session-prune` ×1 失败需上游确认（本机未改动对应文件）。
-4. **R4 私有文件清单需更新**：`apps/desktop/electron/pool-eviction.ts` 已退役，清单剩 `hermes_cli/cli_bridge_mixin.py` 与 `scripts/patch-assistant-ui-render-loop.mjs`。
-5. `.npmrc` 的 `min-release-age=14` 已由上游重新启用 → R14 的 fallback（npm 11.12.1 + `--engine-strict=false`）**已失效**（会踩 ETARGET），必须走 node22 / npm 10.9.4。
-6. `tdx` MCP 仍缺 `<repo>/venv/bin/eltdx-mcp`（既有遗留，启动日志刷 WARNING）。
+**已收口（2026-10-17 当日）**
+
+1. ~~pool backpressure 是否重建~~ → **不重建**（用户决定）。上游 `9c40ddcfc2a` 起 desktop 不再为每个 profile spawn 子进程（`entry.process` 恒为 null，改走 `gateway ensure` + `dialPoolBackend` + `BackendDialClaims`），backpressure 无作用对象；若要恢复它，须先恢复 spawn 路径 + cap，属产品级决定。
+2. R4 私有文件清单已更新（`.clinerules/10-fork-private-deltas.md`）：`pool-eviction.ts` 标为退役，核查命令改为 bridge mixin + render-loop 补丁。
+3. R14 已更新（`.clinerules/20-pm-and-runtime.md`）：`min-release-age=14` 重新启用 → 旧 fallback 失效；并新增 pre-commit 的 ruff 说明 —— 已装 `~/.local/bin/ruff` shim（从 `pyproject.toml` 读 pin，`uvx` 执行），`git commit` 不再 `exit 127`。
+
+**仍需处理**
+
+1. **7 个 profile 的 session_reset 警告**：按提示 `hermes plugins install hermes-session-reset-policy` 可恢复 idle/daily 重置。**未自动执行**：这会改变会话重置策略（用户配置语义），属产品决定。
+2. `voice-prefs` ×2 / `dead-session-prune` ×1 失败需上游确认（本机未改动对应文件）。
+3. **微信端到端确认**：通道已 `connected`，但本轮未代发测试消息；建议发一条验证 bridge/网关链路。
+4. `tdx` MCP 仍缺 `<repo>/venv/bin/eltdx-mcp`（既有遗留，启动日志刷 WARNING）。
 
 ---
 

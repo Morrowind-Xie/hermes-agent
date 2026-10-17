@@ -127,7 +127,18 @@ PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm ci     # rc=0，零 EBADE
 
 **实测（2026-10-11）**：node22 + npm 10.9.4 下 `npm ci` = added 1345 packages / 36s / `rc=0`，postinstall 的 render-loop 补丁 `applied`；随后 desktop `typecheck rc=0`、desktop `eslint --quiet rc=0`、overlay-completeness + pool-eviction `10 passed`、ui-tui/web typecheck 0 error、`i18n-keys --check verified` 全过。
 
-**Fallback**（node22 不可用时）：`npm ci --engine-strict=false`（本机 npm 11.12.1 可用）——**前提是 `.npmrc` 的 `min-release-age=14` 仍处于注释状态**；上游一旦重新启用它，11.12.1 会踩 ETARGET，届时**必须**回到 node22 路径或升级全局 npm 到 ≥11.17.0。
+**Fallback**（node22 不可用时）：**2026-10-17 起已失效** —— 上游在同步 `798b8bf52b` 时重新启用了 `.npmrc` 的 `min-release-age=14`（本地不再是注释态），本机 npm 11.12.1 会踩 ETARGET。必须走 node22 路径，或把全局 npm 升到 ≥11.17.0（该版本同时支持 `min-release-age` 与 `min-release-age-exclude`）。
+
+**pre-commit 的 ruff（2026-10-17 定案）**：本机任何 Hermes 环境里都没有 `ruff`，`lefthook` 的 `lint python` 会 `sh: ruff: not found`（exit 127）并让 commit 失败。已装 shim `~/.local/bin/ruff`，它从 `pyproject.toml` 的 dev 组读出 pin，用 `uvx --from ruff==<pin>` 执行：
+
+```bash
+#!/bin/sh
+repo=/home/morrowind/hermes-agent
+pin=$(sed -n 's/.*"ruff==\([0-9][0-9.]*\)".*/\1/p' "$repo/pyproject.toml" | head -1)
+exec /home/morrowind/.local/bin/uvx --from "ruff==${pin:-0.15.10}" ruff "$@"
+```
+
+`~/.local/bin` 已在 PATH 内，`git commit` 直接可用。⚠ 同步会整体 stage 数千文件，lefthook 会检查**全部** staged 文件（不只是你改的那几个），上游旧代码在新 pin 下可能命中新规则（2026-10-17 实测 3 处 UP：`Optional["threading.Event"]`、`Dict`、`timezone.utc`）。
 
 
 **不要点桌面端的 "Install Hermes locally"**：它跑官方 `install.sh` 分阶段流程，会克隆**上游**仓库到 `~/.hermes/hermes-agent`（不是本 fork），留成半成品后会让桌面端一直卡在首次运行界面（2026-09-26 已发生一次，清除见第九轮日志）。

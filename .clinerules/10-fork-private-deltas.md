@@ -5,19 +5,24 @@
 | 文件 | 作用 |
 |---|---|
 | `hermes_cli/cli_bridge_mixin.py` | 微信↔TUI 桥：bridge 状态字段、`/bridge` 分发、启动自动恢复、工具进度通知、对话镜像同步 |
-| `apps/desktop/electron/pool-eviction.ts` (+ `.test.ts`) | 池饱和 backpressure：`selectPoolEvictions()` → `localBackendSlotsThatMayFree()` → `decideLocalBackendAdmission` |
 | `scripts/patch-assistant-ui-render-loop.mjs` | 根 `package.json` postinstall 里挂的 assistant-ui 渲染环补丁 |
 
 每轮同步后检查是否仍在、是否仍被引用：
 
 ```bash
-for f in hermes_cli/cli_bridge_mixin.py apps/desktop/electron/pool-eviction.ts scripts/patch-assistant-ui-render-loop.mjs; do
+for f in hermes_cli/cli_bridge_mixin.py scripts/patch-assistant-ui-render-loop.mjs; do
   [ -f "$f" ] && echo "ok $f" || echo "MISSING $f"; done
-grep -n 'selectPoolEvictions' apps/desktop/electron/main.ts
+grep -n 'def _handle_bridge_command' hermes_cli/cli_bridge_mixin.py
 find node_modules/@assistant-ui -name subscribable.js -exec grep -c 'hermes-render-loop-patch' {} + | head -1
 ```
 
-`pool-eviction.ts` 已被上游删过一次（`chore(desktop): drop four electron modules nothing imports` —— 删它的前提是"**上游树**里无人引用"），本轮之后它是**fork 本地文件**；再被删就按分叉点恢复。
+> **2026-10-17 起：`apps/desktop/electron/pool-eviction.ts` (+ `.test.ts`) 已退役。** 上游
+> `c63d465dbc refactor(desktop): remove the dead local-backend pool subsystem`（2026-09-09）
+> 之后，desktop 不再 spawn 每-profile 子进程（`entry.process` 恒为 null，改走
+> `hermes gateway ensure` + `dialPoolBackend` + `BackendDialClaims`），池 cap / LRU / 准入判定
+> 全部失去作用对象。fork 的「池饱和 backpressure」135 行随之退役，用户 2026-10-17 确认
+> **不重建**。若将来又要恢复「每 profile 独立后端进程」，必须同时恢复 spawn 路径 + cap，
+> 那时再连同 backpressure 一起重建。
 
 ## R5 · 逐行存活校验（不可省）
 
