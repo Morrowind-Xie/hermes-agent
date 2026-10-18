@@ -4,6 +4,133 @@
 
 ---
 
+## 2026-10-18（第三十四轮）: 主力模型反转 —— `mimo-v2.6-pro` 主力 / `deepseek-flash` 备用（7 home + 7 cron pin 全量统一）
+
+### 需求
+
+把主力模型从 DeepSeek 换回 **MiMo `mimo-v2.6-pro`**，**`deepseek-flash` 转为备用**；所有相关设置统一改（承接第三十一轮的反向操作）。
+
+### 改动矩阵（7 home 完全一致）
+
+| 位置 | 改前 | 改后 | 手段 |
+|---|---|---|---|
+| `model.default/provider/api_mode/base_url` × 7 home | deepseek-flash / deepseek /（无）/ api.deepseek.com/v1 | **mimo-v2.6-pro / mimo / chat_completions / token-plan-cn.xiaomimimo.com/v1** | `hermes config set` ×28（每条独立进程；provider 先设——它会连带清 base_url/api_mode） |
+| `fallback_providers[0]` × 7 home | mimo / mimo-v2.6-pro / token-plan-cn… | **deepseek / deepseek-flash / api.deepseek.com/v1** | `hermes config set` ×21 |
+| cron 7 个 pin（root home） | `deepseek` / `deepseek-flash` | **`custom` / `mimo-v2.6-pro`** | `hermes cron edit <id> --provider custom --model mimo-v2.6-pro` ×7 |
+| cron 其余 17 个（root 12 + invest 4 + coding 1） | None | 不变（跟随主模型自动生效） | 无需动 |
+| aux（title_generation 等） | `provider: auto` + 空 model | 不变（自动跟随新主） | 无需动 |
+
+7 个 pin 全量统一的口径 = 第三十一轮待办 #1 的用户指示（"已按用户指示统一……model 口径完全一致"）。`--provider` 写内核名 `custom`（本轮 `_main_model_pin()` 探针实测复证）。
+
+### 验证（三层 + E2E，全部实测）
+
+1. **解析层**：`cron.jobs._main_model_pin()` → **`('custom', 'mimo-v2.6-pro')`**（改前 `('deepseek', 'deepseek-flash')`）。
+2. **配置层**：7 home 的 `model` 块全部为 `mimo-v2.6-pro / mimo / chat_completions / https://token-plan-cn.xiaomimimo.com/v1`；`hermes fallback list` ×7 均为 `Primary: mimo-v2.6-pro (via mimo)` + `1. deepseek-flash (via deepseek) [https://api.deepseek.com/v1]`。
+3. **E2E 主力真跑**：default home `hermes chat -q '…ok' --oneshot` → `ok`（7 秒）；coding home → `ok`（44 秒重试过，首跑撞验证链 CPU 争用）。
+4. **E2E 回退真实触发**：`--provider minimax -m MiniMax-Text-01`（无凭据）→ `⚠️ Model fallback: MiniMax-Text-01 via minimax unavailable (authentication failed); using deepseek-flash via deepseek.` + `Fallback activated: MiniMax-Text-01 → deepseek-flash (deepseek)`；aux 的 title_generation 亦走 `fallback_providers[0](deepseek)`。**新链实测能接管回退。** 4 条验证会话已删。
+
+### 生效与重启
+
+`systemctl --user restart hermes-gateway hermes-webui`（19:52，验证链全绿后一次性重启，同时载入新代码与新模型）：gateway MainPID=2065020 / webui=2065021，均 `NRestarts=0 active/running`；`gateway_state` **7 profiles 全在线**；webui `9119 → 200`。journal 仅剩已知 session_reset ×7 警告 + 微信侧两条现象（见第三十三轮注意点 4）。
+
+### 回滚
+
+`/tmp/rb/20261018-124204`（R12 全量 21 项：7 份 `config.yaml` + 3 份 `cron/jobs.json` + `.env` ×7 + `gateway_state.json` + 2 份 unit + `state.txt`）。回滚 = 覆盖回文件 + 重启两个 unit。
+
+### 注意点
+
+1. **pin 会切断该任务的全局备用链**（第二十二轮口径）：7 个任务锁死 `mimo-v2.6-pro`，mimo 挂了没有第二顺位。若想让它们也享受 `deepseek-flash` 备用，应改用**取消 pin**——产品决定，未自动做。
+2. **顺序敏感**：`config set model.provider` 连带清 `base_url`/`api_mode`，必须"先 provider，后 api_mode/base_url"。
+3. 回退条目只写 `provider`/`model`/`base_url`，key 永远来自 `custom_providers[name=<provider>]`。
+
+### 待办
+
+1. 7 个 cron pin 是否改回"取消 pin 保留备用链"，等用户决定。
+2. 第三十三轮待办照旧（session_reset 插件、微信桥验证、tdx MCP、tui_pty 环境、R14 括注）。
+
+---
+## 2026-10-18（第三十三轮）: 上游同步至 `ccc6956350`（581 commits / 716 文件，**0 冲突**）+ 桌面打包 fetch failed 定性 + parity 生成物回归修复
+
+### 背景（可复算）
+
+| 项 | 值 |
+|---|---|
+| 同步前 HEAD | `9ba86536bc`（2026-10-17 15:05 +0800） |
+| 上游 tip | `ccc6956350`（2026-10-17 22:28 +0530） |
+| behind / ahead | **581 / 137** |
+| 上游范围（base..tip） | **716 文件，+35,199 / −2,714** |
+| 热点目录 | `tests/gateway` 104、`apps/desktop` 55、`tests/hermes_cli` 42、`plugins/platforms` 33、`tests/agent` 20、`tests/acp_adapter` 16、`gateway/platforms` 13、`website/docs` 12、`ui-tui/src` 12 |
+| 稳定 tag | `SYNCED v2026.9.24`（无新稳定 tag；本轮**用户主动发起**） |
+| 冲突预演/实跑 | `merge-tree` → **0 冲突**；实跑 0 冲突自动合并，合并提交 **`21b9a81681`** |
+
+### 流程（R2，按第三十轮 0 冲突流程：不停服合并）
+
+1. 回滚包 `/tmp/rb/20261018-124204`（21 项，与第三十四轮共用）。
+2. 依赖面合并后**逐字零变化**（`package.json`/`package-lock.json`/`.npmrc`/`uv.lock`/`pyproject.toml`）→ **跳过 `npm ci` 与 `pm install`**；postinstall render-loop 补丁挂钩存活。
+
+### R5 逐行存活（脚本 `/tmp/sync33/verify_private.py`）
+
+```
+BASE=798b8bf52b  REF=9ba86536bc
+files_with_private_changes=32  added_lines_checked=1730
+survived_in_place=1730  relocated=0  whitelisted=0  missing_total=0
+```
+
+### R6 语义复核（零冲突仍逐项 grep，全部过）
+
+`gateway/run_turn.py`：`message_text` 311 赋值 → 391 `bridge_user_msg=`（赋值在前 ✓）、`response` = `_hmwa_shape_agent_response` 判定后值 ✓；`hermes_cli/main_desktop.py` electron_flags 1612→1651→1775 三路 ✓、`HERMES_DESKTOP_HERMES` setdefault 1650 ✓；`test_gui_command.py` electron_flags 3 命中 ✓；`agent/auxiliary_client.py` reasoning_content 剥离 6746 ✓；`plugins/platforms/dingtalk/adapter.py` `t`（`agent.i18n` 导入 52）/`_load_contacts` 150/`_save_contact` 159/`_standalone_send` 881 ✓；`cli_bridge_mixin.py` weixin adapter 导入 201 ✓。
+
+### R7 探针
+
+`('_handle_bridge_command', True) 44`（venv 3.12 与 PM test-env 3.14 双验精确命中）；render-loop 补丁 node_modules 命中 1；R4 两文件在。
+
+### 桌面打包 `TypeError: fetch failed` 定性（执行前用户报障）
+
+链路：`hermes desktop` → `main_desktop.py:1547` `npm run builder` → `prepare-packaging-tools.mjs:89` `downloadElectronArtifactZip` → `@electron/get@5.1.0` `FetchDownloader.js:46` 原生 fetch → 网络层失败。**判定：瞬时网络故障**（URL 事后全 200、直连/带代理均可、缓存已齐、本机 SSL 抖动有先例）。重试即过（本轮 `prepared.json` 一次生成、后续打包 11s）。预案：单跑 prepare 拿 stack / `NODE_USE_ENV_PROXY=1`（undici fetch 不读代理 env）/ 切 `ELECTRON_MIRROR` / 预置 zip 键位。附注：入口应走 PM shim（R13），本次从 `(venv)` 起。
+
+### 验证结果（全串行，日志 `/tmp/sync33/`）
+
+| # | 项目 | 结果 |
+|---|---|---|
+| 1 | pytest（隔离 dev home，11 目录 6213 文件 / ~46752 测试，-j 12，6525s） | ✗137 测试 / 90 文件，**定性后合并回归仅 1（已修，见下）** |
+| 2 | `uv lock --check`（PM uv 0.12.3） | ✓（1s，nothing written） |
+| 3 | npm 依赖 | lockfile 零变化 → **跳过 `npm ci`**；render-loop 补丁仍在 |
+| 4 | typecheck desktop / ui-tui / web | rc=0 / 0 / 0 |
+| 5 | eslint（R3 门槛）desktop `--quiet` / ui-tui / web | **0 error** / 0 error / 0 error |
+| 6 | i18n keys desktop / ui-tui | `verified` / ✓ |
+| 7 | 定向 vitest desktop / ui-tui / web | rc=0 / 0 / 0 |
+| 8 | builds ui-tui / web / desktop + **desktop 打包（--dir）** | rc=0 / 0 / 0 / **0（11s，缓存全命中）** |
+
+### 失败定性（singles33 单跑 90 文件 + extra-round 补验 + upcheck34 上游对照，`/tmp/sync33/`）
+
+| 类别 | 数量 | 结论 |
+|---|---|---|
+| 负载型 flaky（单跑即过） | ~25 | 含旧基线单跑翻绿：`pty_bridge`、`update_lock_protocol`、`process_registry_pty_kill`、`hermes_state`、`tui_gateway_poller`、`model_options_account_usage`、gateway `managed_worker_*` 多数、`session_kanban` 等 |
+| 300s runner 上限击杀（无断言） | 36 | `tests/e2e/core/upgrade/**` 30 + `plugin_activation`/`managed_worker_launch`/`session_tui_ops`/`desktop_build_lock` 等；"NO TESTS RAN" 系击杀汇总措辞 |
+| 缺 CI extras（messaging/fal） | 5 | `source ./activate --test-extras all,anthropic,bedrock,mistral,fal,modal,daytona,parallel-web,messaging` 补装后 **全过**：discord×2 / slack / telegram 合同测试 + `fal_sdk` —— **平台合同面真验证全绿（覆盖本波 platform 适配器改动）** |
+| WSL PTY raw-mode 超时 | 6 | `tui_pty`×4 + `native_codex_app_server_tui` + `terminal_transcript_pty`，同签名 `_pty.py wait_ready` raw mode 120s |
+| 上游同败（upcheck34 互证） | 6 | `attach_handshake`、`managed_worker_checkpoint_limits`、`session_commands_session_scope`、`session_mutation_compress_managed`、`session_read_commands`、`session_tui_ops_session_diff` → 上游/环境型 |
+| 既有基线原样 | 10+ | `git_pack_tidy`、`gateway_service`、`inventory_pricing`、`bot_desktop_browser`、`termux_api_detection`、`voice_mode`、`voice_wsl_pipewire`、`update_pause_record`×2、`update_finish`×2、`dashboard_auth`（1/4 路由枚举 httpx.ReadTimeout 超时 flaky） |
+| **合并回归** | **1 → 已修** | `test_gateway_command_parity`：`website/docs/developer-guide/gateway-command-parity.md` 生成物过期（fork `/bridge` 进注册表 44 项，文档仍是上游 104-command 版）→ `scripts/gen_gateway_command_parity.py` 重生成（+2/−1）→ 复跑 **rc=0** → 随本轮日志一并提交 |
+
+### 注意点
+
+1. **fork 的 slash 命令会使上游生成物过期**：只要动 `_SLASH_DISPATCH`（如 `/bridge`），`gateway-command-parity.md` 必须重跑生成器；上游动 slash 注册表的同步也一样（R6 检查项候选）。
+2. **测试环境默认 extras 只有 `all`**；`messaging`/`fal`/`anthropic`/`bedrock`/`mistral`/`modal`/`daytona`/`parallel-web` 是 opt-in（CI 用全套矩阵）。platform contract 测试缺 extra 时 import 级失败，**极像回归**——先查 extra 再定性。
+3. **`run_tests_parallel` 的 300s/文件上限**会把 `upgrade/**` 整树 SIGKILL；单跑与上游对照都无法给断言结论（结构性限制，非回归证据）。
+4. 微信侧：重启后 home-channel 启动通知失败（`iLink sendmessage session not ready … the user must send the bot a message first (or re-pair)`）；另 1 条 pending message 恢复 `FOREIGN KEY constraint failed`。
+5. `.npmrc` 合并后仍为**注释态**（fork delta 存活）——R14 括注「本地不再是注释态」与实测不符，下次修正；node22 安装口径不变。
+6. 本轮全程用「脱离终端脚本 + 日志文件 + read_files 轮询」推进（终端 shell 集成观测失灵），`chain.sh`/`watchdog.sh`/`singles33.sh`/`extra-round.sh`/`upcheck34.sh`/`finisher.sh` 都在 `/tmp/sync33/`。
+
+### 待办
+
+1. session_reset 插件安装（7 profile WARNING）——产品决定，未自动做。
+2. 微信桥需用户给 bot 发消息/重配对后端到端验证（承接第三十二轮）。
+3. `tdx` MCP 缺 `venv/bin/eltdx-mcp`（遗留）。
+4. tui_pty/raw-mode 6 文件在上游 worktree 是 skip（skip≠pass）；真结论需非 WSL / 真 tty 环境。
+5. R14 括注修正（见注意点 5）。
+
+---
 ## 2026-10-17（第三十二轮）：上游同步至 `798b8bf52b`（4101 commits / 4191 文件）—— 10 冲突 + 本地后端池子系统退役 + 平台适配器插件化
 
 ### 背景（可复算）

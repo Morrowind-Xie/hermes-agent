@@ -26,7 +26,7 @@ narrower routes (`hermes_cli/gateway_chat_commands.py`).
 setting to this local session (its next turn and `config.get`), saving config.yaml only where the
 handler does; `client-local (cli_only)` commands are terminal/UI features of a client.
 
-103 registry commands: 29 control, 18 read, 56 refused.
+104 registry commands: 29 control, 18 read, 57 refused.
 
 | Command | Gateway (`slash.exec`) | Classic CLI | Ink | Desktop | ACP | Notes |
 |---|---|---|---|---|---|---|
@@ -38,6 +38,7 @@ handler does; `client-local (cli_only)` commands are terminal/UI features of a c
 | `/bg` | refused | HermesCLI._handle_background_command | prompt.background | action: background | slash.exec: refused |  |
 | `/blueprint` (/bp) | control | HermesCLI._handle_blueprint_command | slash.exec | slash.exec | slash.exec |  |
 | `/branch` (/fork) | refused | HermesCLI._handle_branch_command | canonical route | action: branch | ACP fork_session |  |
+| `/bridge` (/br) | refused | HermesCLI._handle_bridge_command | slash.exec: refused | slash.exec: refused | slash.exec: refused | client-local (cli_only) |
 | `/browser` | refused | HermesCLI._handle_browser_command | sidecar: browser.manage | action: browser | slash.exec: refused | client-local (cli_only) |
 | `/btw` | refused | HermesCLI._handle_btw_command | prompt.btw | action: btw | slash.exec: refused |  |
 | `/bundles` | read | HermesCLI._handle_bundles_command | slash.exec | slash.exec | slash.exec |  |
