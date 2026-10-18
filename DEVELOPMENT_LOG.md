@@ -4,6 +4,77 @@
 
 ---
 
+## 2026-10-18（第三十五轮）: 主力模型反转回 `deepseek-flash` / `mimo-v2.6-pro` 备用（7 home + 7 cron pin 全量统一）
+
+### 需求
+
+把主力模型从 MiMo 改回 **DeepSeek `deepseek-flash`**，**`mimo-v2.6-pro` 转为备用**；所有相关设置统一改（第三十四轮的反向操作，口径对齐第三十一轮）。
+
+### 动因
+
+旧 gateway 进程（pid `2102638`）在 22:34:47 出现
+`Stream stale for 300s — no chunks received. model=mimo-v2.6-pro context=~355,944 tokens. Killing connection.`
+随后 `APIConnectionError` 重试（attempt 1/3），用户当场要求切回 deepseek。
+
+### 改动矩阵（7 home 完全一致）
+
+| 位置 | 改前 | 改后 | 手段 |
+|---|---|---|---|
+| `model.default/provider/api_mode/base_url` × 7 home | mimo-v2.6-pro / mimo / chat_completions / token-plan-cn… | **deepseek-flash / deepseek /（无）/ api.deepseek.com/v1** | `hermes config set` ×21 + `hermes -p <p> config set` ×21（每 home 6 条、每条独立进程；provider 先设——它连带清 base_url/api_mode） |
+| `fallback_providers[0]` × 7 home | deepseek / deepseek-flash / api.deepseek.com/v1 | **mimo / mimo-v2.6-pro / token-plan-cn.xiaomimimo.com/v1** | 同上（`fallback_providers.0.{provider,model,base_url}`） |
+| cron 7 个 pin（root home） | `custom` / `mimo-v2.6-pro` | **`deepseek` / `deepseek-flash`** | `hermes cron edit <id> --provider deepseek --model deepseek-flash` ×7 |
+| cron 其余 12 个（root）+ invest 4 + coding 1 | None | 不变（跟随主模型自动生效） | 无需动 |
+| aux（title_generation 等 15 个槽） | `provider: auto` + 空 model | 不变（自动跟随新主） | 无需动 |
+| `custom_providers[name=deepseek\|mimo]` | 两侧凭据/端点 | **不变**（备用 key 来自 `custom_providers[name=mimo]`） | 无需动 |
+
+7 个 pin：`74e39dc63d76`、`cb7bc4343e75`(disabled)、`beeb41a12d4a`、`bc45a8b93f10`、`45b6d4f939f4`、`6b14c42d327f`、`8ba9432d913e`。
+
+**profile 定向方式**：`hermes config set` 没有 `--profile` 参数，用全局 `-p <profile>`（实测有效），root home 不带 `-p`。
+
+### "所有相关设置"的盘点结论
+
+| 位置 | 值 | 处置 |
+|---|---|---|
+| `delegation.model`（invest home） | `deepseek-v4-flash-vision-exp` / `deepseek` | **保留**（已指向 deepseek，且不属主力/备用互换） |
+| `delegation` 其余 6 home | 空（继承主模型） | 自动跟随 |
+| `smart_model_routing` | `enabled: false`、`cheap_model: {}` | 无需动 |
+| `model_catalog` | 远端目录 URL | 无需动 |
+| `.env` ×7 / `gateway_state.json` | 无 mimo 引用 | 无需动 |
+| `auth.json` | 含 mimo 凭据 | 保留（备用仍需要） |
+| `~/.config/Hermes` 桌面/系统级配置 | 无 mimo 引用 | 无需动 |
+
+### 验证（三层 + E2E，全部实测）
+
+1. **配置层**：7 个 home 的 `model` 块全部为 `deepseek-flash / deepseek / https://api.deepseek.com/v1`（`model.api_mode` 已被 provider 变更自动清除，`config get` 报 `Config key not set`）；`fallback_providers[0]` 全部为 `mimo / mimo-v2.6-pro / https://token-plan-cn.xiaomimimo.com/v1`。
+2. **解析层**：`cron.jobs._main_model_pin()`（PM 环境 python，逐 home）→ **`('deepseek', 'deepseek-flash')`**（改前 `('custom', 'mimo-v2.6-pro')`）。
+3. **CLI 层**：`hermes fallback list`（root / coding / invest 抽查）均为 `Primary: deepseek-flash (via deepseek)` + `1. mimo-v2.6-pro (via mimo)`。
+4. **E2E 主力真跑**：default home `hermes chat -q 'Reply with exactly: ok' --oneshot` → `ok`（**3 秒**，会话 `local-771570ac…`）。
+5. **E2E 回退真实触发**：`--provider minimax -m MiniMax-Text-01`（无凭据）→
+   `⚠️ Model fallback: MiniMax-Text-01 via minimax unavailable (authentication failed); using mimo-v2.6-pro via mimo.` → 返回 `ok`（**9 秒**，会话 `local-89111177…`）。**新链实测能接管回退。**
+6. **清理**：两条验证会话已 `hermes sessions delete --yes`，`sessions list` 复查 0 命中。
+
+### 生效与重启（22:35–22:36）
+
+`systemctl --user restart hermes-gateway.service hermes-webui.service`：gateway **MainPID=2619012** / webui **2619013**，均 `active/running`、**`NRestarts=0`**；`gateway_state: running`，**7 profiles 全在线**（default/coding/exam/fitness/invest/music/work）；webui `9119 → 200`。journal 仅剩已知项：`tdx` MCP（`venv/bin/eltdx-mcp` 不存在，第三十三轮遗留待办）+ session_reset ×7 已知警告。
+
+### 回滚
+
+`/tmp/rb/20261018-223156`（21 文件：7 份 `config.yaml` + 4 份 `cron/jobs.json` + `.env` ×7 + `gateway_state.json` + 2 份 unit + `state.txt`）。回滚 = 覆盖回文件 + 重启两个 unit。
+
+### 注意点
+
+1. **顺序敏感**：`config set model.provider` 会连带清 `base_url`/`api_mode`（实测提示 "that route belonged to mimo, not deepseek"），必须"先 provider，后 base_url"；`api_mode` 不用手设。
+2. **pin 会切断该任务的全局备用链**：7 个任务锁死 `deepseek-flash`，deepseek 挂了没有第二顺位（同第三十四轮注意点 1）。想让它们享受 `mimo` 备用，应**取消 pin** —— 产品决定，未自动做。
+3. 回退条目只写 `provider`/`model`/`base_url`，key 永远来自 `custom_providers[name=<provider>]`。
+4. `hermes config set` 不能新增列表元素（`IndexError`）；本次只改已存在的 `fallback_providers.0`，未触发。
+
+### 待办
+
+1. 7 个 cron pin 是否改为"取消 pin 保留备用链"，等用户决定。
+2. 第三十三/三十四轮待办照旧（session_reset 插件、tdx MCP、tui_pty 环境、R14 括注）。
+
+---
+
 ## 2026-10-18（第三十四轮）: 主力模型反转 —— `mimo-v2.6-pro` 主力 / `deepseek-flash` 备用（7 home + 7 cron pin 全量统一）
 
 ### 需求
