@@ -46,7 +46,7 @@
 ### 待办
 
 1. 7 个 cron pin 是否改回"取消 pin 保留备用链"，等用户决定。
-2. 第三十三轮待办照旧（session_reset 插件、微信桥验证、tdx MCP、tui_pty 环境、R14 括注）。
+2. 第三十三轮待办照旧（session_reset 插件、tdx MCP、tui_pty 环境、R14 括注）；~~微信桥验证~~ 已完成（见第三十三轮待办 2）。
 
 ---
 ## 2026-10-18（第三十三轮）: 上游同步至 `ccc6956350`（581 commits / 716 文件，**0 冲突**）+ 桌面打包 fetch failed 定性 + parity 生成物回归修复
@@ -125,7 +125,7 @@ survived_in_place=1730  relocated=0  whitelisted=0  missing_total=0
 ### 待办
 
 1. session_reset 插件安装（7 profile WARNING）——产品决定，未自动做。
-2. 微信桥需用户给 bot 发消息/重配对后端到端验证（承接第三十二轮）。
+2. ~~微信桥需用户给 bot 发消息/重配对后端到端验证~~ → **已完成（2026-10-18 20:29）**：用户发消息后 `weixin: connected`（`needs_attention: false`），bridge_inbox 出现真实对话镜像（user_msg+response 双向），journal 无 iLink 报错——桥链路端到端通。
 3. `tdx` MCP 缺 `venv/bin/eltdx-mcp`（遗留）。
 4. tui_pty/raw-mode 6 文件在上游 worktree 是 skip（skip≠pass）；真结论需非 WSL / 真 tty 环境。
 5. R14 括注修正（见注意点 5）。
