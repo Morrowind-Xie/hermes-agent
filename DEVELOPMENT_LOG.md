@@ -4,7 +4,7 @@
 
 ---
 
-## 2026-10-18（第三十六轮）: 钉钉通道发图报 `RuntimeStoreError(invalid_params)` —— 入站媒体未本地化（已修）+ 下载码接口 500（待复测）
+## 2026-10-18（第三十六轮）: 钉钉通道发图报 `RuntimeStoreError(invalid_params)` —— 入站媒体未本地化（已修复 + 23:30 复测通过）
 
 ### 现象
 
@@ -40,7 +40,20 @@
 | `locales/en.yaml`、`locales/zh.yaml` | 新增 `platform.dingtalk.inbound_media_failed`（英文兜底 + 中文文案），失败提示走 `t()` 而不是硬编码 |
 | `tests/gateway/test_dingtalk.py` | 新增 5 个用例：裸 code 丢弃、URL 落盘（含扩展名）、纯图失败发提示且不进 turn、`pictureDownloadCode` 识别、同义字段回写 |
 
-### 验证（已做）
+### 复测结果（23:30，用户实发一张诊断截图）
+
+```
+23:30:34  [Dingtalk] Inbound media cached: img_5ce03b3ab483.png (image)
+23:30:36  tools.vision_tools: vision_analyze: native fast path
+23:30:36  agent.tool_executor: tool vision_analyze completed (0.05s, 88569 chars)
+23:30:41  agent.image_token_cost: 1 images priced 366 tokens each (learned 380 for deepseek-flash@api.deepseek.com)
+```
+
+- 会话库 message 2199：`[The user sent a document: 'img_5ce03b3ab483.png'. It is saved at: …/cache/documents/native-inputs/34c5e8a0…]` → **admission 成功捕获本地媒体**（不再 `invalid_params`）。
+- 23:31:04 助手给出了截图内容级回答（花生壳诊断页 / 域名解析正常 / `127.0.0.1:80` 无监听），说明图**真正进入了模型上下文**且走的是新主力 `deepseek-flash`。
+- `grep -c 'Error resolving media code'` = **4**，全部在 23:08:07–23:10:43（修复前）；修复后为 **0** → 下载码 500 未再复现（新的「双 robotCode + 立即下载」路径下解析成功）。
+
+### 验证（代码层）
 
 - `scripts/run_tests.sh tests/gateway/test_dingtalk.py` → **34 passed / 0 failed**（原 31 + 新 5，其中 2 个并入原类）。
 - `ruff check plugins/platforms/dingtalk/ tests/gateway/test_dingtalk.py` → **All checks passed**。
@@ -53,12 +66,13 @@
 
 ### 待办 / 未决
 
-1. **待用户重发一张图复测**：观察 `Error resolving media code (... robot_code=...)` 是否仍 500；若仍 500，需要查钉钉应用侧（机器人 code 归属 / `Robot.MessageFile.Read` 权限 / 下载码时效），或改用其它取图路径。
-2. 修复已让「发图不再炸会话」，但「图能否被模型看到」取决于 `robot_message_file_download` 能否返回 URL。
+1. ~~待用户重发一张图复测~~ → **已完成（23:30，见上）**。
+2. 遗留观测项：若钉钉下载码接口再出现 `500 unknownError`，用户现在只会收到友好提示（不再炸会话）；届时按 `robot_code` / 应用侧文件读取权限 / 下载码时效继续排查。
+3. 注：本次截图在会话里被记成 `document`（`native-inputs/…png`），vision 仍按图片原生读取，行为正确，无需处理。
 
 ---
 
-
+## 2026-10-18（第三十五轮）: 主力模型反转回 `deepseek-flash` / `mimo-v2.6-pro` 备用（7 home + 7 cron pin 全量统一）
 
 ### 需求
 
