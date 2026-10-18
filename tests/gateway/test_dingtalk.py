@@ -379,6 +379,91 @@ class TestExtractMedia:
         # Without fileName, mime defaults to octet-stream but msg_type_str=="image" still wins
         assert mtypes == ["application/octet-stream"]
 
+    def test_richtext_picture_download_code_is_used_when_download_code_absent(self):
+        """A richText picture item may carry only ``pictureDownloadCode``."""
+        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
+        from gateway.platforms.event import MessageType
+
+        msg = self._msg_with_rich_text(
+            [{"type": "picture", "pictureDownloadCode": "pic_code"}]
+        )
+        msg.message_type = "richText"
+        msg_type, urls, mtypes = DingTalkAdapter._extract_media(
+            DingTalkAdapter, msg
+        )
+        assert msg_type == MessageType.PHOTO
+        assert urls == ["pic_code"]
+        assert mtypes == ["image"]
+
+    def test_resolved_sibling_code_overwrites_download_code(self):
+        """One resolved field must win for both: extract_media reads ``downloadCode`` first."""
+        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
+
+        item = {"downloadCode": "unresolved", "pictureDownloadCode": "unresolved"}
+        DingTalkAdapter._write_back_download_url(
+            item, "pictureDownloadCode", "https://down.dingtalk.com/x.png")
+        assert item["downloadCode"] == item["pictureDownloadCode"] == "https://down.dingtalk.com/x.png"
+
+class TestInboundMediaMaterialization:
+    """Inbound media must reach the gateway as local files (native admission rejects URLs/codes)."""
+
+    @staticmethod
+    def _adapter():
+        from plugins.platforms.dingtalk.adapter import DingTalkAdapter
+        return DingTalkAdapter(PlatformConfig(enabled=True, extra={}))
+
+    @pytest.mark.asyncio
+    async def test_unresolved_download_code_is_dropped(self):
+        adapter = self._adapter()
+        msg = SimpleNamespace(message_type="picture", extensions={})
+        paths, types = await adapter._localize_media(msg, ["rRuFiWvK+dl_code"], ["image"])
+        assert (paths, types) == ([], [])
+
+    @pytest.mark.asyncio
+    async def test_resolved_url_is_cached_locally(self, monkeypatch):
+        from gateway.platforms import base
+
+        calls = []
+
+        async def fake_cache(url, ext=".jpg", retries=2):
+            calls.append((url, ext))
+            return "/home/morrowind/.hermes/profiles/coding/cache/images/img_abc.png"
+
+        monkeypatch.setattr(base, "cache_image_from_url", fake_cache)
+        adapter = self._adapter()
+        msg = SimpleNamespace(message_type="picture", extensions={})
+        paths, types = await adapter._localize_media(
+            msg, ["https://down.dingtalk.com/a/b.png?auth=x"], ["image"])
+        assert paths == ["/home/morrowind/.hermes/profiles/coding/cache/images/img_abc.png"]
+        assert types == ["image"]
+        assert calls[0][1] == ".png"
+
+    @pytest.mark.asyncio
+    async def test_image_only_message_with_unresolved_media_notifies_and_skips_turn(self, monkeypatch):
+        adapter = self._adapter()
+        adapter._dedup.is_duplicate = lambda _msg_id: False
+        adapter._is_user_allowed = lambda *a, **k: True
+        adapter._should_process_message = lambda *a, **k: True
+        adapter._resolve_media_codes = AsyncMock()
+        adapter.send = AsyncMock(return_value=None)
+        adapter.handle_message = AsyncMock()
+        monkeypatch.setattr("plugins.platforms.dingtalk.adapter._save_contact", lambda *a, **k: None)
+        msg = SimpleNamespace(
+            message_id="m1", conversation_id="c1", conversation_type="1",
+            sender_id="u1", sender_staff_id="s1", sender_nick="MW", robot_code=None,
+            session_webhook="", session_webhook_expired_time=0, create_at=0,
+            message_type="picture", image_content=SimpleNamespace(download_code="dl_code_not_url"),
+            rich_text_content=None, extensions={}, is_in_at_list=False,
+        )
+
+        await adapter._on_message(msg)
+
+        assert adapter.handle_message.await_count == 0
+        assert adapter.send.await_count == 1
+        notice = adapter.send.await_args.args[1].lower()
+        assert "download" in notice or "下载" in notice
+
+
 # ---------------------------------------------------------------------------
 # Group gating — require_mention + allowed_users (parity with other platforms)
 # ---------------------------------------------------------------------------

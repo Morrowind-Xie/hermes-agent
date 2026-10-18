@@ -4,7 +4,61 @@
 
 ---
 
-## 2026-10-18（第三十五轮）: 主力模型反转回 `deepseek-flash` / `mimo-v2.6-pro` 备用（7 home + 7 cron pin 全量统一）
+## 2026-10-18（第三十六轮）: 钉钉通道发图报 `RuntimeStoreError(invalid_params)` —— 入站媒体未本地化（已修）+ 下载码接口 500（待复测）
+
+### 现象
+
+钉钉 coding 机器人收到图片后，用户收到
+`Sorry, I encountered an error (RuntimeStoreError). invalid_params Try again or use /reset to start a fresh session.`
+（23:08:07 / 23:08:36 / 23:09:15 / 23:12:51 共 4 次，均 `gateway.platforms.base: [Dingtalk] Error handling message: invalid_params`）
+
+### 根因链（traceback 实证）
+
+1. `plugins/platforms/dingtalk/inbound.py::extract_media` 把钉钉的 **下载码** 直接放进 `media_urls`（图片为 `downloadCode`，URL 解析成功则是 CDN URL）。
+2. 上游 native admission（`gateway/session_envelope.py::prepare_native`）在任何 turn 之前调用
+   `gateway/session_ingress_media.py::capture_native_media`，而 `_open_regular` **只接受绝对路径的本地常规文件**：
+   ```
+   ValueError: native media must be a local regular file
+   → RuntimeStoreError('invalid_params')
+   ```
+   Telegram/Feishu/Discord 等适配器都是**收到即缓存本地**（`media_urls` 永远本地路径），只有钉钉没有这一步 → 整条消息被拒，模型从未看到图。
+3. **另一个独立问题**：`_fetch_download_url`（`robot_message_file_download`）对这 4 张图全部返回
+   `500 unknownError 未知错误`；用 coding 凭据手工探针复现：
+   - 日志里的真实 code（13 分钟后）→ **500** unknownError
+   - 伪造 code → **400** `invalidParameter.robotCode.downloadCode`（下载码有误或已过期）
+   → 说明请求形状正确、参数能过校验，500 是服务端/码归属层面的失败（不是 `RuntimeStoreError` 的直接原因，但会让 `media_urls` 停留在裸 code）。
+
+### 修复（fork 私有 delta）
+
+| 文件 | 改动 |
+|---|---|
+| `plugins/platforms/dingtalk/adapter.py` | 新增 `_localize_media()`：构造 `MessageEvent` 前把每个 URL 下载到 profile 缓存（image/audio 走 `cache_*_from_url`，video/document 走 `cache_*_from_bytes_async`），`media_urls` 只交付本地绝对路径 —— 与其它平台同契约 |
+| 同上 | 解析失败/下载失败时**丢弃该媒体并告警**；纯图片消息则回一句「图片/文件没能下载下来（钉钉下载码解析失败），请重新发送一次，或改发文件。」，不再把裸 code 交给 admission 炸掉会话 |
+| 同上 | `_resolve_media_codes` 依次尝试 `message.robot_code` 与 `client_id` 两个 robotCode；`_write_back_download_url` 把解析成功的 URL 回写到同一 item 的 `downloadCode`/`download_code`/`pictureDownloadCode`（三者只认一个） |
+| 同上 | 诊断日志：失败时打印 `len/prefix/robot_code` 与异常体；成功时 `Inbound media cached: <file> (<type>)` |
+| `plugins/platforms/dingtalk/inbound.py` | richText 项无 `downloadCode` 时回退 `pictureDownloadCode` |
+| `locales/en.yaml`、`locales/zh.yaml` | 新增 `platform.dingtalk.inbound_media_failed`（英文兜底 + 中文文案），失败提示走 `t()` 而不是硬编码 |
+| `tests/gateway/test_dingtalk.py` | 新增 5 个用例：裸 code 丢弃、URL 落盘（含扩展名）、纯图失败发提示且不进 turn、`pictureDownloadCode` 识别、同义字段回写 |
+
+### 验证（已做）
+
+- `scripts/run_tests.sh tests/gateway/test_dingtalk.py` → **34 passed / 0 failed**（原 31 + 新 5，其中 2 个并入原类）。
+- `ruff check plugins/platforms/dingtalk/ tests/gateway/test_dingtalk.py` → **All checks passed**。
+- 真实 URL 自测（`_localize_media` + `https://www.python.org/static/img/python-logo.png`）→ 落盘 `cache/images/img_*.png`（15,770 B，`\x89PNG` magic），扩展名取自 URL。
+- gateway 重启（最终载入 i18n 版本）：`MainPID=2803560`、`NRestarts=0`、`active/running`、`gateway_state=running`、7 profiles。
+
+### 回滚
+
+`/tmp/rb/20261018-2350-code/`（`adapter.py.HEAD` / `inbound.py.HEAD` = 改动前文件，`state.txt`）。回滚 = 覆盖回两个文件 + 重启 gateway。
+
+### 待办 / 未决
+
+1. **待用户重发一张图复测**：观察 `Error resolving media code (... robot_code=...)` 是否仍 500；若仍 500，需要查钉钉应用侧（机器人 code 归属 / `Robot.MessageFile.Read` 权限 / 下载码时效），或改用其它取图路径。
+2. 修复已让「发图不再炸会话」，但「图能否被模型看到」取决于 `robot_message_file_download` 能否返回 URL。
+
+---
+
+
 
 ### 需求
 

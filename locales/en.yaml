@@ -1517,6 +1517,7 @@ platform:
     emotion:
       thinking: "🤔Thinking"
       done: "🥳Done"
+    inbound_media_failed: "Couldn't download that image/file (the DingTalk download code did not resolve). Please resend it, or send it as a file instead."
 
   irc:
     quit_message: "Hermes Agent shutting down"

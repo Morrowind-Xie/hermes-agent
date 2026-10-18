@@ -13,6 +13,7 @@ import uuid
 from datetime import datetime, UTC
 from pathlib import Path
 from typing import Any, List, Optional, Set
+from urllib.parse import unquote, urlparse
 
 # Optional SDKs: catch broad Exception, not just ImportError — their transitive cryptography
 # dependency can raise AttributeError on version skew; a broken optional SDK must degrade gracefully.
@@ -524,7 +525,16 @@ class DingTalkAdapter(BasePlatformAdapter):
         await self._resolve_media_codes(message)  # download codes -> URLs so vision tools can use them
         text = self._extract_text(message)
         msg_type, media_urls, media_types = self._extract_media(message)
+        had_media = bool(media_urls)
+        media_urls, media_types = await self._localize_media(message, media_urls, media_types)
         if not text and not media_urls:
+            if had_media:
+                # An unresolved download code used to reach native admission as a bare string and
+                # raised RuntimeStoreError('invalid_params') there, killing the whole message with
+                # "Sorry, I encountered an error". Nothing usable is left, so say so instead.
+                logger.warning("[%s] Dropping message %s: inbound media could not be materialized", self.name, msg_id)
+                await self.send(chat_id, t("platform.dingtalk.inbound_media_failed"))
+                return
             return logger.debug("[%s] Empty message, skipping", self.name)
         source = self.build_source(chat_id=chat_id, chat_name=getattr(message, "conversation_title", None), chat_type="group" if is_group else "dm",
                                    user_id=sender_id, user_name=sender_nick, user_id_alt=sender_staff_id if sender_staff_id else None,
@@ -542,6 +552,71 @@ class DingTalkAdapter(BasePlatformAdapter):
 
     def _extract_media(self, message: ChatbotMessage):
         return extract_media(message)
+
+    async def _localize_media(self, message: ChatbotMessage, media_urls, media_types):
+        """Download inbound media into the profile cache before the event is built.
+
+        Native admission captures ``media_urls`` as local regular files (every other adapter
+        caches on receipt); a DingTalk CDN URL or an unresolved download code reaching it raises
+        ``RuntimeStoreError('invalid_params')`` and aborts the message.
+        """
+        if not media_urls:
+            return [], []
+        if not HTTPX_AVAILABLE:
+            logger.warning("[%s] httpx unavailable — dropping inbound media", self.name)
+            return [], []
+        from gateway.platforms.base import (
+            _read_httpx_body_with_limit, cache_audio_from_url, cache_document_from_bytes_async,
+            cache_image_from_url, cache_video_from_bytes_async,
+        )
+        ext_content = (getattr(message, "extensions", {}) or {}).get("content")
+        file_name = str(ext_content.get("fileName") or "") if isinstance(ext_content, dict) else ""
+        paths: list[str] = []
+        types: list[str] = []
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            for raw, media_type in zip(media_urls, media_types):
+                url = (raw or "").strip()
+                if not url.lower().startswith(("http://", "https://")):
+                    logger.warning(
+                        "[%s] Unresolved download code (len=%d prefix=%s... msgtype=%s) — dropping media",
+                        self.name, len(url), url[:12], getattr(message, "message_type", ""))
+                    continue
+                try:
+                    if media_type == "image" or media_type.startswith("image/"):
+                        path = await cache_image_from_url(url, ext=self._media_ext(url) or ".jpg")
+                    elif media_type == "audio":
+                        path = await cache_audio_from_url(url)
+                    else:
+                        async with client.stream("GET", url) as response:
+                            response.raise_for_status()
+                            data = await _read_httpx_body_with_limit(response, media_type=media_type or "media")
+                        if media_type == "video":
+                            path = await cache_video_from_bytes_async(data, self._media_ext(url) or ".mp4")
+                        else:
+                            path = await cache_document_from_bytes_async(
+                                data, self._document_name(url, file_name))
+                except Exception as exc:
+                    logger.warning("[%s] Failed to cache inbound media (host=%s): %s — dropping",
+                                   self.name, url.split("/")[2] if "//" in url else "?", exc)
+                    continue
+                paths.append(path)
+                types.append(media_type)
+                logger.info("[%s] Inbound media cached: %s (%s)", self.name, Path(path).name, media_type)
+        return paths, types
+
+    @staticmethod
+    def _media_ext(url: str) -> str:
+        suffix = Path(urlparse(url).path).suffix.lower()
+        return suffix if suffix and len(suffix) <= 6 and suffix[1:].isalnum() else ""
+
+    @classmethod
+    def _document_name(cls, url: str, file_name: str) -> str:
+        name = Path(unquote(urlparse(url).path)).name or Path(file_name).name
+        if not name:
+            return f"dingtalk_{uuid.uuid4().hex[:8]}{cls._media_ext(url)}"
+        if not Path(name).suffix and (suffix := cls._media_ext(url)):
+            name += suffix
+        return name
 
     async def send(self, chat_id: str, content: str, reply_to: Optional[str] = None, metadata: Optional[dict[str, Any]] = None) -> SendResult:
         """Send a reply via AI Card (when configured) or DingTalk session webhook markdown."""
@@ -801,30 +876,53 @@ class DingTalkAdapter(BasePlatformAdapter):
         token = await self._get_access_token()
         if not token:
             return
-        robot_code = getattr(message, "robot_code", None) or self._client_id
+        robot_codes = []
+        for candidate in (getattr(message, "robot_code", None), self._client_id):
+            if candidate and candidate not in robot_codes:
+                robot_codes.append(candidate)
         pairs = [(getattr(obj, key, None) if hasattr(obj, key) else obj.get(key), obj, key) for obj, key in collect_download_codes(message)]
-        tasks = [self._fetch_download_url(code, robot_code, token, obj, key) for code, obj, key in pairs if code]
+        tasks = [self._fetch_download_url(code, robot_codes, token, obj, key) for code, obj, key in pairs if code]
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
 
-    async def _fetch_download_url(self, code: str, robot_code: str, token: str, obj, key: str) -> None:
+    async def _fetch_download_url(self, code: str, robot_codes: list[str], token: str, obj, key: str) -> None:
         """Fetch the download URL for one code via the robot SDK and write it back to ``obj[key]``."""
         if not self._robot_sdk:
             return logger.warning("[%s] Robot SDK not initialized, cannot resolve media code", self.name)
-        try:
-            response = await self._sdk_call(self._robot_sdk.robot_message_file_download_with_options_async,
-                                            dingtalk_robot_models.RobotMessageFileDownloadRequest(download_code=code, robot_code=robot_code),
-                                            dingtalk_robot_models.RobotMessageFileDownloadHeaders, token)
-            body = response.body if response else None
-            url = getattr(body, "download_url", None) if body else None
-            if not body:
-                logger.warning("[%s] Failed to download media: empty response for code %s", self.name, code)
-            elif url and hasattr(obj, key):
-                setattr(obj, key, url)
-            elif url and isinstance(obj, dict):
-                obj[key] = url
-        except Exception as e:
-            logger.error("[%s] Error resolving media code %s: %s", self.name, code, e)
+        for robot_code in robot_codes:
+            try:
+                response = await self._sdk_call(self._robot_sdk.robot_message_file_download_with_options_async,
+                                                dingtalk_robot_models.RobotMessageFileDownloadRequest(download_code=code, robot_code=robot_code),
+                                                dingtalk_robot_models.RobotMessageFileDownloadHeaders, token)
+                body = response.body if response else None
+                url = getattr(body, "download_url", None) if body else None
+                if not body:
+                    logger.warning("[%s] Failed to download media: empty response for code %s (robot_code=%s)",
+                                   self.name, code[:12], robot_code[:8])
+                elif url:
+                    self._write_back_download_url(obj, key, url)
+                    logger.debug("[%s] Resolved media code (robot_code=%s)", self.name, robot_code[:8])
+                    return
+            except Exception as e:
+                logger.error("[%s] Error resolving media code (len=%d prefix=%s... robot_code=%s): %s",
+                             self.name, len(code), code[:12], robot_code[:8], e)
+
+    @staticmethod
+    def _write_back_download_url(obj, key: str, url: str) -> None:
+        """Point every download-code field of one media object at the resolved URL.
+
+        Rich-text items can carry both ``downloadCode`` and ``pictureDownloadCode`` and only one
+        may resolve; ``extract_media`` reads ``downloadCode`` first, so a resolved sibling must
+        overwrite it too.
+        """
+        if isinstance(obj, dict):
+            for name in {key, "downloadCode", "download_code", "pictureDownloadCode"}:
+                if name in obj:
+                    obj[name] = url
+        elif hasattr(obj, "download_code"):
+            obj.download_code = url
+        elif hasattr(obj, key):
+            setattr(obj, key, url)
 
     @staticmethod
     def _normalize_markdown(text: str) -> str:

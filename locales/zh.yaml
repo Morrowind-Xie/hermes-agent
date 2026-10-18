@@ -1448,6 +1448,7 @@ platform:
     emotion:
       thinking: "🤔思考中"
       done: "🥳完成"
+    inbound_media_failed: "图片/文件没能下载下来（钉钉下载码解析失败），请重新发送一次，或改发文件。"
   irc:
     quit_message: "Hermes Agent 正在关闭"
     standalone_quit: "已送达"
