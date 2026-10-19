@@ -4,6 +4,101 @@
 
 ---
 
+## 2026-10-20（第三十七轮）: 钉钉「专题一」机器人接入 —— 新增 `topic1` profile，零重启热接管
+
+### 需求
+
+用户在钉钉开发者平台新建企业应用/机器人「专题一」（Client ID `ding9z7v5xaxrulzrcrn`），要求以**新增 profile** 的方式接入 Hermes，不改动现有业务机器人。
+
+### 现状盘点（可复算）
+
+| 事实 | 证据 |
+|---|---|
+| 接入前已有 **7 个**钉钉机器人，一 profile 一 bot | `gateway_state.json.platforms`：`dingtalk` + `coding/exam/fitness/invest/music/work:dingtalk` 全 `connected` |
+| 7 个 Client ID 互不相同 | default + 6 profile 的 `.env` 逐个取 `DINGTALK_CLIENT_ID`（均 20 位、`ding…` 前缀） |
+| SDK 已就位（无需装依赖） | PM 环境：`dingtalk_stream-0.24.3` / `alibabacloud_dingtalk-2.2.42` / `websockets-15.0.1` |
+| 多路复用开着 | `~/.hermes/config.yaml:523` `multiplex_profiles: true`；`served_profiles` 7 → **8** |
+| 平台启用条件 = **双**凭据在场 | `plugins/platforms/dingtalk/gateway_env.py` `ENV_ENABLE_CREDENTIALS = ("DINGTALK_CLIENT_ID","DINGTALK_CLIENT_SECRET")` → 只有 Client ID 时平台不启用，不产生半连接报错 |
+| robotCode 默认 = client_id | `adapter.py:257` `self._robot_code = extra.get("robot_code") or self._client_id` |
+| 一个 bot token 只能挂一个 profile | `profile create --clone` 输出明确 "Messaging channels were NOT cloned (…dingtalk…)" |
+
+### 本轮性质：**零代码改动**，只改运行时配置
+
+未触碰仓库任何源码 / 测试 / 依赖；`plugins/platforms/dingtalk/` 的第三十六轮私有 delta 不动。
+
+### 操作步骤
+
+1. **回滚包**（R12）：`/tmp/rb/dingtalk-topic1-20261020-001032/`（`env.default`、`config.yaml`、6 个 profile 的 `env.*` / `config.*.yaml`、`gateway_state.json`、`state.txt`），`/tmp/rb/LATEST` 指向它。
+2. **Client ID 查重**：`grep -rn 'ding9z7v5xaxrulzrcrn' ~/.hermes/.env ~/.hermes/profiles/*/.env` → 无命中。
+3. **建 profile**：`./.hermes/bin/hermes profile create topic1 --clone --description "专题一：…"`
+   - 克隆自 active（`default`），复制 `config.yaml` / `.env` / `SOUL.md` / skills + 3 个插件（`hermes-achievements`、`review_dispatch`、`session_bridge`）。
+   - `.env` 落盘 **12 个模型键**（`DEEPSEEK_API_KEY` 等）+ `HERMES_GATEWAY_TOKEN`，**`DINGTALK_*` 计数 = 0**（机器人 token 按设计未复制）。
+   - 生成别名 `/home/morrowind/.local/bin/topic1`。
+4. **凭据先验（写盘前）**：`POST /v1.0/oauth2/accessToken` → `{"expireIn":7200,"accessToken":...}` ✓；Secret 长度 **64**。
+5. **写 profile `.env`**（`chmod 600`）：`DINGTALK_CLIENT_ID` / `DINGTALK_CLIENT_SECRET`（64 字符）/ `DINGTALK_ALLOW_ALL_USERS=true`（与现有 6 个 profile 同口径）。
+6. **客户端"添加"（主动建会话）**：`POST /v1.0/robot/oToMessages/batchSend`
+   - `robotCode=ding9z7v5xaxrulzrcrn`、`userIds=["2007694155-90533195"]`、`msgKey=sampleText`
+   - staffId 来源：本 fork 的钉钉联系人缓存 `~/.hermes/state/dingtalk_contacts.json`（key `cidPwT0Mde7303AS8TzaFSgWxlSZOSADltzVLEpiRonppE=`，`is_group: false`）
+   - 结果 **HTTP 200**，`invalidStaffIdList` / `filteredStaffIdList` / `flowControlledStaffIdList` 三个列表**全空**，`processQueryKey=eIfeYqDOMYbl1sJf0Cu6THZb4ZTrqLTIgVwNoADF+RM=`
+   - → 同时证明「AppSecret 正确」+「机器人发送消息权限已开通」；会话直接出现在用户钉钉消息列表，无需搜索/扫码。
+
+### 生效机制（代码依据，本轮实证）
+
+- `gateway/run_profile_reconcile.py:29` `_PROFILE_RESCAN_INTERVAL_SECS = 30.0` —— 每 30 秒扫一次 `profiles/`。
+- `:30` `_PROFILE_SIGNATURE_FILES = ("config.yaml", ".env")`；`:163-166` 新目录进 `added`，签名变化进 `changed`。
+- **`:165` 的 `changed` 明确排除 `n != active`** → 改 **default** 的 `.env` **必须重启**；改 secondary profile（含新建 topic1）≤30 秒热重建 adapter。
+- 平台启用走 `env → extra` 桥（`gateway.platform_env.EnvCred`），因此 `config.yaml` 里**不需要** `platforms.dingtalk` 条目。
+
+### 验证结果（全部实测，CST）
+
+```
+00:10:44  [MULTIPLEX] Now serving profile 'topic1' (0 adapter(s) connected; control-socket)
+00:11:00  [MULTIPLEX] Re-scanned profile 'topic1' after config/.env change (0 adapter(s) connected)   # 只有 CLIENT_ID
+00:14:49  gateway.run: ✓ dingtalk connected (profile: topic1)
+00:14:49  [MULTIPLEX] Re-scanned profile 'topic1' after config/.env change (1 adapter(s) connected)   # 写入 SECRET 后
+```
+
+- `gateway_state.json`：`topic1:dingtalk → connected`（`updated_at 2026-10-19T16:14:48Z` = 00:14:48 CST）；`served_profiles = [default, coding, exam, fitness, invest, music, topic1, work]`。
+- **零影响**：`MainPID=1536393`、`NRestarts=1`、`active/running` 全流程未变；其余 7 个 `*:dingtalk` 与 `weixin` / `api_server` / `webhook` / `qqbot` 保持 `connected`，**全程未重启**。
+- `grep -ci 'topic1.*(error|fail|traceback)' gateway.log` = **0**。
+- `topic1/state.db` `select count(*) from sessions` = **0**（等用户首条入站建会话）。
+
+### 踩到的坑（下轮复用）
+
+1. **控制台显示的 Secret 带掩码**（`xNTHW-46L3****_SDCDVWTr9`），不能直接写入；必须用"复制"取全长值（本轮 64 字符）。
+2. **终端 shell integration 会回显旧 scrollback**，导致读到过期 `gateway_state.json`（一度看到 `served_profiles` 里没有 topic1）。判读改为**落文件再读**（`/tmp/rb/probe.txt`、`/tmp/rb/state.txt`）。
+3. **多行 traceback 让 `awk '$0 >= "ts"'` 时间过滤失效**（裸行首字母 `T` > 数字 `2`，会被当成"晚于"）。改用 `grep -n` 定位行号 + 回溯最近时间戳：本轮两条 `native media must be a local regular file` / `RuntimeStoreError: invalid_params` 实为 **2026-10-18 23:13:36** 的旧记录（第 6082/6124 行），与本次无关。
+4. **钉钉客户端"添加机器人"没有统一入口**：企业内部应用机器人**不在通讯录**；三个入口 = 顶部搜索框搜应用名 / 工作台应用卡片（需配首页）/ 群设置 → 机器人（或智能群助手）→ 添加机器人。群内 `@` 必须从 `@` 弹窗的**成员列表**选中，手打 `@名称` 无效。
+5. 「专题一」只是应用显示名，**对 Hermes 无意义**；Hermes 只认 AppKey/AppSecret，robotCode 默认等于 AppKey。
+
+### 冲突与取舍
+
+- **新增 profile 而非替换**：一 bot 一 profile 是硬约束（重复 token 会被 multiplexer park，`--clone-channels` 在 live multiplex 下直接拒绝）；新增可让专题一拥有独立会话/记忆/人设。
+- **`ALLOW_ALL_USERS=true`**：为与现有 6 个 profile 口径一致并便于当场验证；已确认可一行收紧（staffId 已知：`2007694155-90533195`），未擅自修改以免影响用户预期的多人试用。
+- **不改 `config.yaml`**：凭据在场即启用，少一处状态（也少一处将来同步时的冲突面）。
+
+### 下次同步的注意点
+
+1. `served_profiles` 现在是 **8 个**；同步后 `gateway_state.json.platforms` 应有 **8 个** `*:dingtalk` 条目（default + 7 profile）。少一个即说明该 profile 的钉钉凭据/插件注册被上游变更破坏。
+2. `gateway/run_profile_reconcile.py` 是本轮的机制依赖（30s watcher + 签名比对）；若上游重写该模块，需重新确认「新增 profile 免重启」与「`changed` 排除 active」两条结论是否仍成立。
+3. 本轮**无代码 delta**，R5 逐行存活校验不涉及；但 `plugins/platforms/dingtalk/adapter.py` 仍是 R6 常驻重叠文件（第三十六轮 delta：`_localize_media` / `_resolve_media_codes` / 联系人缓存），同步后照旧复核。
+4. 改 **default** 的 `.env` 仍需 `systemctl --user restart hermes-gateway`（reconcile 不覆盖 active）。
+
+### 待办
+
+1. **首条入站闭环**：用户发 DM 后取 `sqlite3 -header -column ~/.hermes/profiles/topic1/state.db "select source, chat_type, substr(chat_id,1,18), message_count, last_activity_at from sessions order by last_activity_at desc limit 5;"` → 期望出现 `dingtalk` 行且 `chat` 为新 `cid…`（不同于 `cidPwT0Mde…`）。**未自动完成：需要用户发消息。**
+2. **是否收紧 allowlist**（改 `DINGTALK_ALLOWED_USERS=2007694155-90533195`）：等用户确认，不擅自动访问策略。
+3. **是否轮换 AppSecret**：Secret 已在对话中出现，建议控制台重置后写回（热生效，30 秒）。
+4. **`SOUL.md` 人设**：现为 default 克隆的通用人设，等用户给出"专题一"的领域定位后再写。
+5. **群内使用前置**：开发者后台需开启机器人「允许添加到群」，本轮未验证（用户尚未在群里试）。
+
+### 回滚
+
+- 最小：`./.hermes/bin/hermes profile delete topic1`（只摘掉这一个机器人，其余 7 个不受影响）。
+- 保守：还原 `/tmp/rb/dingtalk-topic1-20261020-001032/`（本轮未改 default 的任何文件，备份仅作保险）。
+
+---
+
 ## 2026-10-18（第三十六轮）: 钉钉通道发图报 `RuntimeStoreError(invalid_params)` —— 入站媒体未本地化（已修复 + 23:30 复测通过）
 
 ### 现象
