@@ -89,6 +89,18 @@ expected_rewrites_whitelisted=1 missing_total=0
 
 平台状态（`gateway_state.json`）：`weixin` / `api_server` / `webhook` / `qqbot` / `dingtalk` + `coding|exam|fitness|invest|music|topic1|work:dingtalk` **全部 `connected`、`needs_attention=false`**；`feishu` disconnected（第十六轮按用户要求停用，非回归）。journal 三条既有告警照旧：`tdx` MCP 缺 `venv/bin/eltdx-mcp`、`session_reset.mode: both` 需装 `hermes-session-reset-policy` 插件、weixin 启动通知因 iLink session 需用户先发消息而失败。
 
+#### 附带事故：`hermes-webui` 重启炸弹（已修复）
+
+重启后 9 分钟 `NRestarts` 从 0 涨到 **5**（`StartLimitBurst=5`，即将被打到 start-limit）。journal 实录链条：
+
+1. `ExecStart=.hermes/bin/hermes dashboard --port 9119 --no-open`（**不带 `--skip-build`**）→ 每次启动都 `→ Building web UI...`；
+2. 新 lock 使 `scripts/build/node-deps.mjs --reuse` 重跑 `npm install`（`added 1277 packages in 59s`）→ **把 `node_modules/electron/dist` 清掉**；
+3. 紧接着 `prepareElectronRuntime` 调 `electron/install.js`（用的是 **PM tools 的 node 26.12.1**）→ `TypeError: fetch failed`；
+4. 构建失败 → `Main process exited, code=exited, status=1/FAILURE` → `Restart=on-failure` / `RestartSec=15` → 15s 一次循环。
+
+处置（`/tmp/sync2/webui_fix.sh`，全部 rc=0）：`systemctl --user stop` → 用 **node22** 重跑 `node scripts/build/electron-runtime.mjs --source .`（从 `~/.cache/electron` 解出，5s，`dist/version=44.9.3`）→ `reset-failed` → `start`。45s 后 `SubState=running`、`NRestarts=0`、`MainPID=195771`；`curl /api/health` → `{"ok":true,"version":"0.22.5","displayVersion":"0.22.5+617","commit":"188e0170ed67…"}`（即合并后代码）。**为什么同一命令在我的 shell 里成功**：用 node22；systemd 侧走 node26 且无代理 → 下载路径失败，但准备好 `dist/` 后 `prepared()` 直接短路、不再联网。
+
+
 ### 下次同步的注意点
 
 1. **parity 表永远不要手工解冲突**：取上游 + 重跑 `scripts/gen_gateway_command_parity.py`；`/bridge` 由 registry 自动生成，统计行随上游新增命令自动变。
@@ -104,6 +116,7 @@ expected_rewrites_whitelisted=1 missing_total=0
 2. `hud-modifier` 原生模块未编译（缺 `libx11-dev`）——既有环境限制，本轮未处理。
 3. `tdx` MCP 缺 `venv/bin/eltdx-mcp`、`session_reset.mode` 插件未装 —— 两条既有待办，仍未自动做（前者是遗留包装问题，后者是产品决定）。
 4. weixin 启动通知需用户先给 bot 发一条消息才会恢复会话（重启后的正常表现，非缺陷）。
+5. **`hermes dashboard` 自动构建会清掉 `node_modules/electron/dist`**：下次同步（lock 变化）后若 webui 进入 15s 崩溃循环，先 `stop` → node22 跑 `electron-runtime.mjs --source .` → `reset-failed` → `start`。长期方案（未做，需评估）：给 unit 加 `--skip-build`（产物由部署步骤保证），或给 unit 注入代理环境。
 
 
 ## 2026-10-20（第三十七轮）: 钉钉「专题一」机器人接入 —— 新增 `topic1` profile，零重启热接管
