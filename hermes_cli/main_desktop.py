@@ -1866,6 +1866,7 @@ def cmd_gui(args: argparse.Namespace):
                 raise FileNotFoundError(executable)
         except OSError as exc:
             print(f"✗ Prepared Electron runtime is missing: {exc}")
+            print("  From the project root, run: node scripts/build/electron-runtime.mjs --source .")
             raise SystemExit(1) from exc
         # `desktop.electron_flags` used to reach only the packaged path below, so a
         # `--source` launch silently ran on a different Ozone backend than the one
