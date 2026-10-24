@@ -4,6 +4,108 @@
 
 ---
 
+## 2026-10-24（第三十八轮）: 上游同步至 `5894e750c3`（2217 提交 / 2841 文件）—— 1 冲突（parity 生成物）+ Electron 40→44 大版本跳跃
+
+### 需求与判定
+
+用户主动要求「合并」。按 R1 判定：最新稳定 tag `v2026.9.24` 已是 HEAD 祖先（`SYNCED`），但用户明确要同步，故按 R2 全流程执行。上游 tip `5894e750c3`（2026-10-23 17:40 −0700）。
+
+| 项 | 值 |
+|---|---|
+| 合并前 HEAD | `2a82ad3022`（第三十七轮 docs），`main` 领先 `fork/main` **4** → 先 `git push fork main`（`5d6c16e864..2a82ad3022`）再合并，避免混入 |
+| 上次同步点（merge-base） | `ccc6956350`（第三十三轮，2026-10-18 06:04 +0530） |
+| 落后 / 领先 | **2217**（2126 内容提交 + 91 合并节点；first-parent 口径 1551）/ 144 |
+| 规模 | **2841 files, +145,597 −55,989**（第三十三轮 716 文件的 **4 倍**） |
+| 合并提交 | **`c77356e769`** `Merge remote-tracking branch 'origin/main'` |
+| 结构面 | 新增 **545** 个非测试 py 模块、**236** 个测试文件、删除 **45** 个测试；根目录 `mcp_serve.py` 删除 |
+| 提交类型 | fix 999 / chore 299 / test 179 / feat 176 / refactor 110 / catalog 74 / docs 50 / perf 20 / ci 15 / style 7 / revert 2 |
+| 日期分布 | 10-17 68、10-18 456、10-19 290、10-20 **523**、10-21 116、10-22 180、10-23 **465** |
+
+热点目录（变更文件数）：`apps/desktop 580`、`tests/gateway 184`、`tests/hermes_cli 169`、`tests/tools 152`、`website/docs 98`、`ui-tui/src 55`、`skills/creative 55`、`plugins/platforms 25`、`web/src 16`、`gateway/platforms 13`。
+
+### 冲突预演 vs 实跑
+
+`git merge-tree --write-tree main origin/main` 预演 **1 个 content 冲突、0 个 modify/delete**；`git merge origin/main --no-edit` 实跑**同样 1 个**：
+
+| 文件 | 解决方式 | 理由 |
+|---|---|---|
+| `website/docs/developer-guide/gateway-command-parity.md` | 取上游版本（`git checkout --theirs`）→ 合并后用合并后的代码重跑 `scripts/gen_gateway_command_parity.py` | 我们第三十三轮手工插了 `/bridge` 行并改统计行 `103→104`；上游本波 12 次再生成该表（`4eb2eea6b0` / `c3ffb05741` / `1b581ee1c0` …）且新增 `/discard`（`read` 列 18→19）。**不要手工解**：整表由代码派生，`tests/hermes_cli/test_gateway_command_parity.py` 的 `--check` 会守住漂移 |
+
+生成结果：**`105 registry commands: 29 control, 19 read, 57 refused`**，`/bridge (/br)` 行与上游 `/discard` 行同时在场（生成器读 registry，私有命令自动出现）。全树冲突标记 `0`、unmerged `0`。
+
+### R5 逐行存活校验（脚本 `/tmp/sync2/verify_private.py`，BASE=`ccc6956350` REF=`2a82ad3022`）
+
+```
+files_with_private_changes=37   added_lines_checked=1914
+survived_in_place=1913          relocated_to_new_modules=0
+expected_rewrites_whitelisted=1 missing_total=0
+```
+
+唯一白名单项就是上面那条统计行（`104 …18 read…` → `105 …19 read…`），刻意重写。
+
+### R6 语义复核（自动合并的 10 个重叠文件，逐项 grep）
+
+- **`gateway/run_turn.py`**：bridge takeover 块在 226-300 行（订阅文件 + config.yaml `bridge:` 节 + heartbeat 10s 判活）；`message_text` **311 赋值 → 391 `bridge_user_msg=`** 使用（同函数、赋值在前 ✓）；391 传入的 `response` 来自 380 `_hmwa_shape_agent_response`（silence 判定在此）→ 386 `_usage_window_chat_wording` → 390 footer = **判定后的值** ✓。上游本波把 response 包进 `_usage_window_chat_wording(...)`、新增 `policy_turn_toolsets` / `executing_admission`，均不与私有落点相邻。
+- **`hermes_cli/main_desktop.py`**：`config_electron_flags` 1612 赋值 → 1651 返回 → 1761 解包 → 1775 bundled / **1876 source**（`[str(executable), ".", *flags]`）/ 1884 packaged 三路贯通 ✓；`HERMES_DESKTOP_HERMES` setdefault 1650 ✓。上游本波只加了一行「runtime 缺失时跑 electron-runtime.mjs」提示。
+- **`hermes_cli/commands.py`**：`CommandDef("bridge", aliases=("br",), cli_only=True)` 在 100 行 ✓（上游新增 `discard`）。
+- **`cli.py`**：类头仍以 `CLIBridgeMixin` 结尾（873 行）✓；上游删了 `_show_browser_backend_notice`、`_cleanup_all_browsers` shim 改指 `tools.browser_session_lifecycle`（与私有无关）。
+- **`apps/desktop/electron/main.ts`**：IME 上报私有段在 2224-2232（`INPUT_METHOD_REPORT` / `rememberLog('[ime] …')`）✓，上游 main 进程 160/447 大改未触碰该段。
+- **`apps/desktop/src/lib/desktop-slash-registry.json`**（生成物）：`/br`、`/bridge`、`/discard` 三条并存 ✓。
+- 上游**完全未触碰**的私有 delta（14 项）：`agent/reasoning_effort.py`、`bootstrap-platform.ts(+test)`（`describeLinuxInputMethod` 268 行导出 ✓）、`runtime-repository.ts(+test)`、`model-providers/{xiaomi,custom}`、`plugins/platforms/dingtalk/{adapter,inbound}.py`、`linux_desktop_entry.py`、`tests/fixtures/provider_wire_snapshot.json`、`tests/gateway/test_dingtalk.py`、`tests/hermes_cli/test_gui_command.py`、`gateway-config.yaml`。
+- **R4 常驻文件**：`hermes_cli/cli_bridge_mixin.py`（`_handle_bridge_command` 244 行）、`scripts/patch-assistant-ui-render-loop.mjs` 均在；根 `package.json` postinstall 私有行上游未动（14 行）→ 自动保留；`npm ci` 后补丁命中 `node_modules/@assistant-ui/…/subscribable.js` **1** 处 ✓。
+
+### R7 探针
+
+`./venv/bin/python -c "from cli import HermesCLI; print(HermesCLI._slash_handler('bridge'), len(HermesCLI._SLASH_DISPATCH))"` → **`('_handle_bridge_command', True) 44`**（与基线一致；上游 `discard` 是 `gateway_only`，不进 CLI dispatch）。
+
+### 依赖与构建影响（本波最重的一次）
+
+- **Python**：`pyproject.toml` + `uv.lock`（5156 行重写）。主升 `openai 2.24.0→2.54.0`、`pydantic 2.13.4→2.14.1`、`requests 2.34.2`、`cryptography 50.0.2`、`Pillow 12.3.0→13.0.0`、`numpy 2.4.3→2.5.4`、`asyncpg 0.32.0`、`aiohttp 3.14.5`、`slack-sdk 3.45.0`、`croniter 6.2.4`，新增 `ruamel.yaml.clib`。**PM 依赖环境已按新 lock 重建**（`scripts/run-in-hermes-env` / vitest 首启都会触发 pm 的 hash 校验安装，实测 `✓ Tools + dependencies installed (hash-verified via pm + uv.lock)`）→ `./.hermes/bin/hermes --version` 正常，R8 的「no dependency environment is committed」未复现。
+- **Node**：`package-lock.json` 1624 行 → 必须 `npm ci`。关键 `electron 40.10.2→**44.9.3**`、`vite 8.2.0→8.2.4`、`vitest 4.1.11→4.1.12`、`simple-git 3.36.0→4.0.2`、`katex 0.16.47→0.18.4`、新增 `@simple-git/argv-parser`、`ws 8.21.1`。`.npmrc` 删了 vite/rolldown 的 `min-release-age-exclude`、新增 sanitize-html/vitest/electron → **`min-release-age=14` 仍在生效**，R14 的 node22 路径仍是唯一可行路径。
+- **Electron 二进制**：`npm ci` **不落** `dist/`（allow-scripts 策略），必须 `node scripts/build/electron-runtime.mjs --source .`（CI 同款）→ 落点从旧的 `apps/desktop/node_modules/electron/dist` 变为**根 hoist** `node_modules/electron/dist`（`path.txt=electron`、`dist/version=44.9.3`、二进制 229 MB）。`_electron_dir()` 先 workspace 后 root hoist，故源码启动可用。
+- **前端产物**：`web/src` 16 文件 → `hermes_cli/web_dist` 重建；`ui-tui/src` 55 文件 → `ui-tui/dist` 重建（`build:ink` 先行）；desktop 重建。
+### 验证链（全串行，逐项 rc）
+
+| 步骤 | 结果 |
+|---|---|
+| R5 逐行存活 | `missing_total=0`（1914 行、1 白名单） |
+| 定向 pytest | `test_gui_command.py` + `test_dingtalk.py` + `test_xiaomi_profile.py` + `test_gateway_command_parity.py` → **4 files / 127 passed / 0 failed / 20 skipped**（3.1s，runner 自报 CI 等价形态） |
+| `uv lock --check` | rc=0（1s，uv 0.13.5） |
+| `npm ci`（node22 / npm 10.9.4） | rc=0（36s，零 EBADENGINE） |
+| desktop `typecheck` | rc=0（58s，4 个 tsc 工程） |
+| desktop `eslint src/ electron/ --quiet` | rc=0（51s，**零输出=零 error**） |
+| 定向 vitest | **15 files / 109 tests passed**（25.3s；含 `bootstrap-platform.test.ts` 19、`runtime-repository.test.ts` 11、i18n overlay/catalog 完整性） |
+| web build | rc=0（vite 8.2.4，4.83s，2274 modules） |
+| tui build | rc=0（`build:ink` 16ms + `tui.mjs` 139ms → `ui-tui/dist/entry.js` 3.9 MB） |
+| desktop build | rc=0（40s；`install-stamp.json` → `c77356e769827aff…`；`hud-modifier` 原生模块因缺 `libx11-dev` 未编译，**既有环境限制**，打包继续） |
+| PM shim | `Hermes Agent v0.22.5+616.gc77356e (2026.9.24) · stable · local c77356e76982`，Python **3.14.9**，OpenAI SDK **2.54.0** |
+| R7 探针 | `('_handle_bridge_command', True) 44` |
+
+### 服务重启（R9）
+
+回滚包：`/tmp/rb/20261024-…-sync38/`（`env.default` + 7 profile `env.*` + `config.yaml` + 7 `config.*.yaml` + `gateway_state.json` + `unit.service` + `cuda.conf` + `webui.service` + `state.txt`），`/tmp/rb/LATEST` 指向它。
+
+`systemctl --user restart hermes-gateway.service` → rc=0；**MainPID 2150024 → 108439，`SubState=running`，`NRestarts=0`**（未进 auto-restart），`served_profiles` **8**。`hermes-webui.service` 同样重启 → MainPID 109808 running。
+
+平台状态（`gateway_state.json`）：`weixin` / `api_server` / `webhook` / `qqbot` / `dingtalk` + `coding|exam|fitness|invest|music|topic1|work:dingtalk` **全部 `connected`、`needs_attention=false`**；`feishu` disconnected（第十六轮按用户要求停用，非回归）。journal 三条既有告警照旧：`tdx` MCP 缺 `venv/bin/eltdx-mcp`、`session_reset.mode: both` 需装 `hermes-session-reset-policy` 插件、weixin 启动通知因 iLink session 需用户先发消息而失败。
+
+### 下次同步的注意点
+
+1. **parity 表永远不要手工解冲突**：取上游 + 重跑 `scripts/gen_gateway_command_parity.py`；`/bridge` 由 registry 自动生成，统计行随上游新增命令自动变。
+2. **Electron 大版本跳跃要单独验 CJK 输入**：本轮 40.10.2 → 44.9.3（Chromium 跨代），私有 IME 补丁（`bootstrap-platform.ts` + `main.ts` 上报）只验到编译与单测，**需实机用中文输入法确认**（第 24 轮踩过 IME 丢失）。
+3. **`npm ci` 不落 Electron 二进制**，桌面端跑之前必须 `node scripts/build/electron-runtime.mjs --source .`；落点可能在根 hoist（本轮即如此）。
+4. 上游本波把 `response` 又包了一层（`_usage_window_chat_wording`）；bridge 镜像语义仍取「判定后的 response」——每轮都要重新确认这层包装没把私有传参挪走。
+5. 合并前先 `git push fork main`（本轮 4 个未推送提交），否则合并提交会与本地提交混在一批。
+6. 本波体量 2841 文件 + Electron 跨代，验证链总耗时约 **5 分钟**（不含 Electron 229 MB 下载）。
+
+### 待办
+
+1. **桌面端实机验证中文输入 + Electron 44 行为**（未自动做：需要用户在真实桌面会话里输入 CJK，headless 无法替代）。
+2. `hud-modifier` 原生模块未编译（缺 `libx11-dev`）——既有环境限制，本轮未处理。
+3. `tdx` MCP 缺 `venv/bin/eltdx-mcp`、`session_reset.mode` 插件未装 —— 两条既有待办，仍未自动做（前者是遗留包装问题，后者是产品决定）。
+4. weixin 启动通知需用户先给 bot 发一条消息才会恢复会话（重启后的正常表现，非缺陷）。
+
+
 ## 2026-10-20（第三十七轮）: 钉钉「专题一」机器人接入 —— 新增 `topic1` profile，零重启热接管
 
 ### 需求
