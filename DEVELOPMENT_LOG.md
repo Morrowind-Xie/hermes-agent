@@ -4,6 +4,82 @@
 
 ---
 
+## 2026-10-24（第三十九轮）: 主力模型切到 Kimi K3.1 Pro（deepseek-flash 备用）+ 新增 Kimi 联网搜索为主力搜索
+
+### 需求
+
+用户提供 Moonshot API key，要求按 `platform.kimi.com/docs` 把 **Kimi K3.1 Pro** 配成主力模型、**deepseek-flash** 作备用；并用 `/v1/tools/search`、`/v1/tools/search_pro`、`/v1/tools/fetch` 三端点做一套「Kimi 版搜索工具」当主力搜索。
+
+### 活体事实核对（先用 key 打真实请求，再动配置）
+
+| 探针 | 结果 |
+|---|---|
+| `GET /v1/models` | 可用：`kimi-k3.1-pro`（**1,048,576** ctx）、`kimi-k3.1-pro-highspeed`、`kimi-k3`、`kimi-k2.6`、`kimi-k2.7-code(-highspeed)` |
+| `POST /v1/chat/completions`（kimi-k3.1-pro + `thinking.enabled` + `reasoning_effort=high`） | **200**，`reasoning_content` 有内容（thinking 生效） |
+| 同上 + `temperature: 0.7` | **400** `invalid temperature: only 1 is allowed for this model` → **必须走内置 `kimi-coding-cn` profile**（`fixed_temperature=OMIT_TEMPERATURE`），不能当 custom provider |
+| `model=kimi-k2-turbo-preview` | **404**（该 id 已下线，而它正是 `KimiProfile.default_aux_model`）→ 必须显式指定 aux 模型 |
+| `POST /v1/tools/search` / `search_pro` / `fetch` | 均 **200**（Pro 返回 `chunks[{text,score}]`；fetch 返回 `{url,markdown,title}`） |
+
+### 模型配置（8 个 home：default + coding/exam/fitness/invest/music/topic1/work）
+
+```yaml
+model:
+  default: kimi-k3.1-pro
+  provider: kimi-coding-cn          # base_url 解析为 https://api.moonshot.cn/v1
+  base_url: https://api.moonshot.cn/v1
+fallback_providers:
+  - {provider: deepseek, model: deepseek-flash, base_url: https://api.deepseek.com/v1}   # 用户指定备用
+  - {provider: mimo,     model: mimo-v2.6-pro,  base_url: https://token-plan-cn.xiaomimimo.com/v1}  # 二级兜底
+agent:
+  reasoning_effort: high            # K3 不传 effort 时服务端默认 max（3x 推理 token），high 才是它的文档默认
+web:
+  search_backend: kimi              # 主力搜索
+  extract_backend: kimi             # 主力抓取
+```
+
+- **aux 统一到 `deepseek` / `deepseek-flash`**（22 个角色：15 个原本就在 config 里 + 7 个只存在于默认值的 `review` / `memory_query_rewrite` / `voice_chat` / `goal_judge` / `background_review` / `moa_reference` / `moa_aggregator` 显式落盘）。两个理由：①`kimi-k2-turbo-preview` 已 404，让 aux 留在 Kimi 会直接失败；②标题/压缩/后台复盘这类高频小任务不该烧 K3.1 Pro。
+- **cron**：default home 7 个带 model 的 job 由 `deepseek-flash/deepseek` → `kimi-k3.1-pro/kimi-coding-cn`（与既有「主力模型全量统一」口径一致）。
+- **`.env`**：8 个 home 写入 `KIMI_CN_API_KEY`（`chmod 600`），这也是 `kimi-coding-cn` 读取的变量名。
+
+### 搜索插件（新，fork 私有）
+
+`plugins/web/kimi/`（`plugin.yaml` + `__init__.py` + `provider.py`），按仓库 `website/docs/developer-guide/web-search-provider-plugin.md` 的 ABC 实现：
+
+- `search()`：**Pro 端点**（`/v1/tools/search_pro`）默认；`web.kimi.search: basic` 可切 Basic（并支持 `include_content`）。`sites`（≤5、过滤空白/括号）与 `time_window{start,end}` 透传 Pro。`limit` 夹到 1–20。
+- 归一：`title` 缺失回退 `site_name` → `url`；`chunks` 按 score 降序拼进 `description`（上限 1200 字符），`[site · date]` 前缀便于模型判断时效。
+- `extract()`：逐 URL 调 `/v1/tools/fetch` → `document(url,title,markdown)`；单 URL 失败只产出带 `error` 的条目，不整批失败；非 http(s) 直接拒绝。
+- 错误信封 `{"error":{"type","message"}}` → `type: message` 原样回给模型。
+- 配置 `web.kimi.{search,include_content,sites,time_window,timeout}`；key 解析 `MOONSHOT_API_KEY` → `KIMI_CN_API_KEY` → `KIMI_API_KEY`。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 新插件单测 | `tests/tools/test_web_providers_kimi.py` → **8 passed / 0 failed**（1.4s）；`ruff check` → All checks passed |
+| 端到端（真实 HTTP，`PYTHONPATH=<repo>`） | `registered kimi: True` / `active search: kimi` / `active extract: kimi`；`web_search` 2 条真实结果（description 347 字符）；`web_extract` 918 字符，title `Example Domain` |
+| 真实 CLI 一次性对话 | 会话 `local-30a1adc1…`：`model=kimi-k3.1-pro`、`billing_provider=kimi-coding-cn`、`billing_base_url=https://api.moonshot.cn/v1`、`reasoning_tokens=449`，17s；标题生成（aux→deepseek）正常 |
+| 网关 | `2543309` → **`2549406`**（第二次重启加载 `reasoning_effort`），`NRestarts=0`，`served_profiles` **8** |
+| dashboard | MainPID `2544672`，running，`/api/health` 正常 |
+
+### 踩坑（写进排查口诀）
+
+1. **PM workspace 遮蔽**：直接用 `~/.hermes/installs/<key>/environments/<hash>/venv/bin/python` 跑脚本时，`hermes_cli` 会从 `.../workspace/hermes_cli`（环境快照，**不含新文件**）加载 → `plugins/web/kimi` 根本扫不到，于是先后得出「已注册 / 未注册」两个互相矛盾的结论。手工跑 Hermes 的 Python 代码必须带 `PYTHONPATH=<repo>`，或直接走 `<repo>/.hermes/bin/hermes`（网关本身就是活检出）。
+2. `web_extract_tool` 的成功信封是 `{"data":[...]}`，**没有** `success` 键 —— 判成功看 `data[].content`，别把 `None` 当失败。
+
+### 下次同步注意
+
+1. `plugins/web/kimi/` 是 fork 私有目录（已登记进 `.clinerules/10-fork-private-deltas.md` R4）。上游若自带同名 provider 会在同步时冲突 → **让路**：本站实现改名 `kimi-cn` 并同步改 8 个 home 的 `web.search_backend` / `web.extract_backend`，不要删实现。
+2. `KimiProfile.default_aux_model = kimi-k2-turbo-preview` 这个 id 在本账号已 **404**；我们靠「22 条 aux 显式 deepseek」绕开。上游若改 aux 解析顺序或重命名角色，同步后必须复核这 22 条仍在且指向 `deepseek/deepseek-flash`。
+3. K3 effort 词表是 `low/high/max`（`medium→high`、`xhigh→max`）；`agent.reasoning_effort: high` 是刻意选择 —— 不传 effort 时服务端默认 **max**（约 3x 推理 token）。
+4. 搜索默认走 **Pro**（带 `chunks` 正文，单价高于 Basic）；要省钱改 `web.kimi.search: basic`。
+
+### 待办
+
+1. `web.kimi.sites` / `web.kimi.time_window`（Pro 的站点/时间窗约束）已实现但未配任何值 —— 需要时按查询场景在 config 里加。
+2. 旧 key（deepseek / mimo / bailian）保留作回落安全网，未清理。
+3. 各 surface（桌面端、微信、TUI）下次新会话即用新主力模型；网关已重启并重建 8 个 profile 的 adapter。
+
+
 ## 2026-10-24（第三十八轮）: 上游同步至 `5894e750c3`（2217 提交 / 2841 文件）—— 1 冲突（parity 生成物）+ Electron 40→44 大版本跳跃
 
 ### 需求与判定

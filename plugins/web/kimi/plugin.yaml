@@ -1,0 +1,9 @@
+name: web-kimi
+version: 1.0.0
+description: "Kimi (Moonshot) 联网搜索 Basic/Pro + 网页抓取 — https://platform.kimi.com/docs/api/tools-search. Set MOONSHOT_API_KEY or KIMI_CN_API_KEY."
+author: Morrowind-Xie
+kind: backend
+provides_web_providers:
+  - kimi
+requires_env:
+  - MOONSHOT_API_KEY

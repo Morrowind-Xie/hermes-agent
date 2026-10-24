@@ -6,6 +6,7 @@
 |---|---|
 | `hermes_cli/cli_bridge_mixin.py` | 微信↔TUI 桥：bridge 状态字段、`/bridge` 分发、启动自动恢复、工具进度通知、对话镜像同步 |
 | `scripts/patch-assistant-ui-render-loop.mjs` | 根 `package.json` postinstall 里挂的 assistant-ui 渲染环补丁 |
+| `plugins/web/kimi/{provider.py,__init__.py,plugin.yaml}` | Kimi（Moonshot）联网搜索 provider：`web.search_backend: kimi` / `web.extract_backend: kimi`；Basic `/v1/tools/search`（`web.kimi.search: basic`）+ Pro `/v1/tools/search_pro`（默认）+ `/v1/tools/fetch`；key 取 `MOONSHOT_API_KEY` → `KIMI_CN_API_KEY` → `KIMI_API_KEY`。测试 `tests/tools/test_web_providers_kimi.py`。**上游若新增同名 `plugins/web/kimi/` 会在同步时冲突** → 让路时把本站 provider 改名 `kimi-cn` 并同步改 8 个 home 的 `web.*_backend` |
 
 每轮同步后检查是否仍在、是否仍被引用：
 
