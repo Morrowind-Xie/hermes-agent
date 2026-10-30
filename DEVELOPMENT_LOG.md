@@ -4,6 +4,100 @@
 
 ---
 
+## 2026-10-30（第四十一轮）: 同步上游 2577 提交（零文本冲突）+ JS 工具链升到 node 26 / npm 12
+
+### 背景（数字）
+
+- 用户主动要求同步（**不是** R1 的 tag 触发）：最新稳定 tag 仍是 **v2026.9.24（2026-09-24）**，此后 36 天上游没再切新稳定 tag。
+- 上次同步点 `c77356e769`（2026-10-24）；本次上游 tip `d4865574e4`（2026-10-30，当天 50 提交）。
+- `git rev-list --left-right --count HEAD...origin/main` = **148 / 2577**（本地领先 148、落后 2577）。
+- 差异规模：**3239 files changed, 189513 insertions(+), 63672 deletions(-)**。
+- 热点目录（改动文件数）：`apps/desktop` 815、`tests/hermes_cli` 268、`tests/gateway` 181、`website/docs` 112、`tests/agent` 105、`contributors/emails` 82、`tests/tools` 70、`plugins/config_backends` 61、`skills/productivity` 48、`optional-skills/mlops` 44、根文件 42、`tests/tui_gateway` 36、`web/src` 34。
+
+### 流程
+
+1. **预检**：工作区有第四十轮遗留的 4 项（`tui_gateway/methods_slash.py`、`tests/tui_gateway/test_quick_alias_mirror.py`、`DEVELOPMENT_LOG.md`、`.clinerules/10-fork-private-deltas.md`）。先跑定向测试 `test_quick_alias_mirror.py` → **6 passed**，再单独提交为 `102359cd57`（合并前工作区必须干净）。
+2. **回滚包**（R12）：`/tmp/rb/20261030-225135` —— 8 个 profile 的 `.env`/`config.yaml`、`gateway_state.json`、gateway/webui unit、state.txt（15 项；`10-fork-legacy-interpreter.conf` 已不存在，符合 R9 现状）。
+3. **冲突预演**：`git merge-tree --write-tree --name-only main origin/main` → 只输出一行 tree `b89f3bf80544…`，`rc=0`，**没有任何冲突文件名**。
+4. **合并**：`git merge origin/main --no-edit` → `rc=0`，merge commit **`948ae8142c`**（父 `102359cd57` + 上游 `d4865574e4`），`git ls-files -u` = **0**，`git grep '^<<<<<<< '` 无命中。
+5. **R5 逐行存活校验**：`BASE=5894e750c3`（上次同步到的上游 tip，2026-10-23）`REF=102359cd57`（合并前 HEAD），脚本按 R5 口径重建于 `/tmp/sync5/verify_private.py` → **files=43 added_lines=2397 missing=0 rewritten=0 / missing_total=0**。
+6. **R6 语义复核**：见下节。
+7. **验证链（全串行）**：pytest 定向集 → 新增测试集 → `uv lock --check` → `npm ci` → desktop typecheck → desktop eslint → desktop vitest(electron) → web typecheck+lint → ui-tui typecheck+lint+i18n → web build → desktop build → 服务重启验活。
+
+### 冲突与取舍
+
+**零文本冲突，但 6 个常驻重叠文件都被上游大改**（`git diff --numstat 102359cd57..HEAD`）：`agent/auxiliary_client.py` +116/−162、`apps/desktop/electron/main.ts` +196/−273、`gateway/run_turn.py` +13/−17、`hermes_cli/main_desktop.py` +76/−21、`apps/desktop/src/i18n/*.ts`（新增 `*_error_codes.ts`/`*_gateway_host.ts`/`*_memory_layers.ts`/`*_preview_web.ts` 等 60+ 文件）；`tests/hermes_cli/test_gui_command.py` 与 `tui_gateway/methods_slash.py` 上游**未动**。
+
+逐项结论（R6 的两个问题：作用域 / 判定前后语义）：
+
+| 文件 | 我们的补丁 | 复核结论 |
+|---|---|---|
+| `gateway/run_turn.py` | bridge inbox（227-300）+ `bridge_user_msg=message_text`（391） | `message_text` 在 **311 行**赋值（同函数、早于 391）✓；`response` 来自 **380 行** `_hmwa_shape_agent_response`（silence 判定之后）并经 386/390 footer → 镜像发的是实际发出值 ✓；上游改动落在 351/354（`persisted_user_metadata_for_event`）、1825（drain 判定）、2397（display settings `asyncio.to_thread`），与我们的行段不重叠 |
+| `hermes_cli/main_desktop.py` | PM shim 注入 + source 启动带 `electron_flags` | `launcher = …/.hermes/bin/hermes` + `env.setdefault("HERMES_DESKTOP_HERMES", …)` 在 **1692-1695**；`launch_command = [str(executable), ".", *config_electron_flags]` 在 **1938**（含 rationale 注释）；两处均在上游重构后的正确分支内 ✓ |
+| `agent/auxiliary_client.py` | `_build_call_kwargs` 剥离 `reasoning_content`（#15250） | 函数仍在 **6682 行**，剥离块在 **6696-6702**，位于 `kwargs` 构造之前 ✓ |
+| `apps/desktop/electron/main.ts` | IME 可达性上报 | `describeLinuxInputMethod` 由 `bootstrap-platform.ts:326`（`export { … }` 块）导出，main.ts **105** import、**2193** `INPUT_METHOD_REPORT` 使用 ✓ |
+| `tests/hermes_cli/test_gui_command.py` | 2 个 `electron_flags` 测试 + IME 用例 | 上游未改；`test_gui_command.py` 全绿（含在定向集内） |
+| `tui_gateway/methods_slash.py` | `_quick_alias_target`(518) / `_mirror_model_switch`(543) | 上游未改；探针返回 `/kimi`→`('model','kimi-k3.1-pro --provider kimi-coding-cn')`、`/ds`→`('model','deepseek-flash --provider deepseek')` ✓ |
+
+**环境迁移（本轮最大的非代码变化）**：上游把 JS 工具链推到 **node ≥ 26**（root 与 `apps/desktop` 的 `engines.node = ">=26"`、`.nvmrc` = `26`），本机 nvm 只有 22.22.0 / 24.13.0 → 旧 R14 的「node22 + npm 10.9.4」路径**彻底失效**。改用 pm store 里已有的 **node-26.12.1-linux-x64 + npm-12.0.2-linux-x64**（后者满足 `engines.npm = "<11.10.0 || >=11.17.0"`），`.clinerules/20-pm-and-runtime.md` R14 已改写。另：`.npmrc` 的 `min-release-age=14` 现在是**注释态**（上游临时关闭），`engine-strict=true` 仍在。
+
+`uv` 也被上游钉到 **0.13.5**（`scripts/run_tests.sh` 自动 staging，旧的 0.12.3 仍在 store 里）。
+
+### 验证结果（全串行）
+
+| 项 | 结果 |
+|---|---|
+| 定向 pytest（12 文件：quick_alias_mirror / test_gui_command / web_providers_kimi / weixin×4 / kanban_toolset_opt_in / kimi·custom·xiaomi·thinking_toggle profile） | **227 passed / 0 failed / 20 skipped**（skip = macos/windows lane），rc=0 |
+| 新增测试集（本波上游新增的 405 个 `.py`，隔离 dev home） | **3223 passed / 9 failed / 4 errors / 41 skipped**；7 个文件失败，逐条判定见下 |
+| `uv lock --check`（uv 0.13.5） | rc=0，356 packages，无锁漂移 |
+| `npm ci`（node 26.12.1 + npm 12.0.2） | rc=0，**added 1288 packages / 44s**，`assistant-ui render-loop patch: applied`，lefthook hooks synced |
+| desktop `typecheck`（4 个 tsc 项目） | rc=0 |
+| desktop `eslint src/ electron/ --quiet` | rc=0（**0 error**） |
+| desktop `vitest run --project electron` | 411 文件 / **4041 用例：4008 passed、1 failed、32 skipped**（失败见下） |
+| web `typecheck` + `lint` | typecheck 通过；lint **0 error / 28 warnings** |
+| ui-tui `typecheck` + `lint` + `i18n:keys:check` | 通过；lint **0 error / 18 warnings**；`locales/_keys.tui.json` fresh（1386 keys） |
+| `npm run build --workspace web` | rc=0，产物落到 `hermes_cli/web_dist`（`✓ built in 4.27s`） |
+| desktop `npm run build` | rc=0（`electron-main.mjs` 3.0mb / preload 45.3kb） |
+| R7 bridge 探针 | `('_handle_bridge_command', True) 44` ✓ |
+| 服务重启 | dashboard PID **3599458**（http 200，监听 9119，NRestarts=0）；gateway PID **3602805**（active/running，NRestarts=0，`served_profiles` 8） |
+
+**失败逐条归因（全部环境性，无一条由合并引入）**：
+
+| 失败 | 数量 | 归因 |
+|---|---|---|
+| `tests/hermes_cli/test_webapp_private_launch.py` | 7（7 failed / 5 passed，单跑同样） | `hermes_cli/webapp_launcher.py:124` 的 `if os.name == "nt" or is_wsl(): return False` —— 被测行为**显式排除 WSL**，本机是 WSL2（`6.18.33.2-microsoft-standard-WSL2`），测试注释也写了 "These tests simulate those hosts on Linux" |
+| `tests/agent/test_vault_key_storage.py`、`tests/hermes_cli/test_vault_key_cli.py` | 2 collection error | `ModuleNotFoundError: No module named 'keyring'` —— `keyring` 只属 pyproject 可选 extra `keychain = ["keyring==25.7.0"]`，本机 test 环境未装该 extra |
+| `tests/docker/test_login_shell_path.py`、`tests/docker/test_webapp_bundle.py` | 2 error | `docker build` 失败：`dial tcp …:443: connect: connection refused`（registry 不可达） |
+| `tests/gateway/test_webapp_listener_fallback.py` | 1 | `could not listen on 127.0.0.1:47153 (Address already in use)` —— 12 并行 worker 抢端口；**单跑即通过** |
+| `tests/tui_gateway/test_groups_route_parity.py` | 1 | `task-1 fenced: driver lease is stale or expired` —— 并行时序；**单跑即通过** |
+| `tests/tools/test_bot_desktop_idle_self_stop.py` | 1 | `launcher.sh: line 260: Xvnc: command not found` —— 本机缺 TigerVNC（Bot Desktop 虚拟屏依赖） |
+| `apps/desktop/scripts/mac-sign.test.mjs`（vitest electron） | 1 | `TypeError: Invalid Version: 6.18.33.2-microsoft-standard-WSL2` —— `@electron/osx-sign` 把 `os.release()` 当 semver；合并前后该依赖同为 **2.4.0**、测试文件未被上游改动 → 既有环境失败 |
+
+### 运行时观察（重启后）
+
+- 新增 7 条**行为变更警告**：`session_reset.mode: both is no longer applied: gateway conversations reset only on /new or /reset`（coding/exam/fitness/invest/music/topic1/work 各一条）—— 上游把 idle/daily 重置挪进了插件 `hermes-session-reset-policy`。**用户配置里的 `session_reset.mode: both` 自此无效**，要恢复旧行为需 `hermes plugins install hermes-session-reset-policy`（本轮**未装**，属用户策略选择）。
+- 启动时一条 `gateway.shutdown_flush: Failed to recover pending message … FOREIGN KEY constraint failed` —— 旧 pending 消息在新 schema 下恢复失败，非阻断（进程正常 running）。
+- weixin 启动通知 `session not ready … the user must send the bot a message first (or re-pair)` 与历史一致，非本轮引入。
+
+### 下次同步的注意点
+
+1. **node 版本门是第一道坎**：上游 `engines.node` 已是 `>=26`。用 `PATH="$HOME/.hermes/tools/node-26.12.1-linux-x64/bin:$HOME/.hermes/tools/npm-12.0.2-linux-x64/bin:$PATH"`；pm store 若出现更新版本（如 node-27），按 `ls -d ~/.hermes/tools/node-*` 的实际值替换。
+2. **微信测试已改名**：`tests/gateway/test_weixin.py` 不存在了，现为 `test_weixin_plugin.py` / `test_weixin_secret_scope.py` / `test_weixin_typing.py` / `test_weixin_voice_warning_policy.py` —— 常规集要跟着改。
+3. **整目录 pytest 跑不动**：5 个热点目录 = **5864 文件 / ~44541 用例**，90 分钟 timeout 只跑到 3.6%（1602/44541）。可行口径是「本波**新增**的测试文件」：`git diff --name-only --diff-filter=A <old>..<new> -- tests/` → 本轮 405 文件 / ~2047 用例 / 7.7 分钟。
+4. **WSL 上天生红的测试**：`test_webapp_private_launch.py`（7 条）、`mac-sign.test.mjs`（1 条）。看到就先按环境性归因，别再排查合并。
+5. 并行假失败要单跑复验：端口独占（webapp listener）、`driver lease` 时序这类在 `-j 12` 下会红，单文件复跑即绿。
+6. `.npmrc` 的 `min-release-age` 会来回开关（上游自己注释/启用）；开了也别慌，npm 12.0.2 支持 `min-release-age-exclude`。
+7. 上游开始把「配置项失效」做成启动 WARNING（如本轮的 `session_reset.mode`）—— 重启后务必看 `journalctl --user -u hermes-gateway` 的前 30 行，不要只看 systemd 的 active/running。
+
+### 待办
+
+- `hermes plugins install hermes-session-reset-policy`（**未自动执行**：是否要 idle/daily 重置是用户策略，且装插件会改 gateway 行为，需用户拍板）。
+- 可选：给 test 环境补 `keyring`（extra `keychain`）以覆盖 2 个 vault 测试（**未执行**：R10 禁止裸 pip/uv 改环境，要补得走 PM 的 extra 机制）。
+- 可选：装 TigerVNC（`Xvnc`）以覆盖 Bot Desktop 虚拟屏用例（**未执行**：属宿主依赖，非项目依赖）。
+- 桌面端未运行，本轮无需重建 Electron 运行时；`apps/desktop` build 产物已刷新。
+
+---
+
 ## 2026-10-25（第四十轮）: 主力模型切回 DeepSeek Flash（Kimi 降为备用）+ 新增 `/kimi` / `/ds` 主动切模型命令
 
 ### 需求

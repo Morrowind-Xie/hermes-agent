@@ -113,21 +113,21 @@ ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open
 
 **排查口诀**：看到 `pydantic_core._pydantic_core` / `mcp` / `_cffi_backend` 缺失的报错，**先查启动命令的解释器版本**，不要去 pip 装包。
 
-## R14 · JS 依赖安装固定走 nvm Node 22.22.0（2026-10-11 定案）
+## R14 · JS 依赖安装固定走 PM store 的 Node 26.12.1 + npm 12.0.2（2026-10-30 改定）
 
-**背景**：上游 `.npmrc` 设 `engine-strict=true`，`package.json` 的 `engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16：那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`）。本机全局 `/usr/local/bin/npm` 是 **11.12.1 → 落在排除带**，`npm ci` 一律 `EBADENGINE` 硬失败。nvm 里的 **Node 22.22.0 自带 npm 10.9.4**（`<11.10.0` 分支）且 node 也满足 `^22.22.0` → **完全合规、零升级**。
+**背景**：上游 `.npmrc` 设 `engine-strict=true`；**root 与 `apps/desktop` 的 `engines.node = ">=26"`**、`engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16：那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`）、`.nvmrc` = `26`。
 
-**规则**：凡 `npm ci` / `npm install` 类**安装**动作，前置 PATH：
+**2026-10-30 起旧的 nvm 路径已失效**：本机 nvm 只有 node **22.22.0（npm 10.9.4）/ 24.13.0（npm 11.12.1）**，node 都不满足 `>=26`，全局 npm 11.12.1 又落在排除带 → `npm ci` 一律 `EBADENGINE`。pm store 已备 **`node-26.12.1-linux-x64`** 与 **`npm-12.0.2-linux-x64`**（`>=11.17.0` 分支），零额外安装。
+
+**规则**：凡 `npm ci` / `npm install` 类**安装**动作，前置 PATH（安装 + 运行 tsc/eslint/vitest/build 一律用它，省得两套 node 打架）：
 
 ```bash
-PATH="$HOME/.nvm/versions/node/v22.22.0/bin:$PATH" npm ci     # rc=0，零 EBADENGINE
+PATH="$HOME/.hermes/tools/node-26.12.1-linux-x64/bin:$HOME/.hermes/tools/npm-12.0.2-linux-x64/bin:$PATH" npm ci
 ```
 
-**区分（重要）**：engine 门只管 `npm` 自身；**运行时工具（eslint / tsc / vitest / vite build）用默认 node 24.13 完全合规**（`engines.node` 收 `^24.11.0`），无需切换。lefthook 的 pre-commit 也不受影响。
+**实测（2026-10-30 第四十一轮）**：node 26.12.1 + npm 12.0.2 下 `npm ci` = added 1288 packages / 44s / `rc=0`，postinstall 的 render-loop 补丁 `applied`；随后 desktop `typecheck rc=0`、desktop `eslint --quiet rc=0`、`vitest run --project electron` 4041 用例中 1 failed（`scripts/mac-sign.test.mjs`：WSL2 内核串 `6.18.33.2-microsoft-standard-WSL2` 被 `@electron/osx-sign` 当 semver 解析 —— 合并前 `@electron/osx-sign` 同为 2.4.0、该测试文件未被上游改动，**环境性既有失败**）、web typecheck + lint 0 error、ui-tui typecheck + lint 0 error + i18n keys fresh、web build / desktop build `rc=0`。
 
-**实测（2026-10-11）**：node22 + npm 10.9.4 下 `npm ci` = added 1345 packages / 36s / `rc=0`，postinstall 的 render-loop 补丁 `applied`；随后 desktop `typecheck rc=0`、desktop `eslint --quiet rc=0`、overlay-completeness + pool-eviction `10 passed`、ui-tui/web typecheck 0 error、`i18n-keys --check verified` 全过。
-
-**Fallback**（node22 不可用时）：**2026-10-17 起已失效** —— 上游在同步 `798b8bf52b` 时重新启用了 `.npmrc` 的 `min-release-age=14`（本地不再是注释态），本机 npm 11.12.1 会踩 ETARGET。必须走 node22 路径，或把全局 npm 升到 ≥11.17.0（该版本同时支持 `min-release-age` 与 `min-release-age-exclude`）。
+**`.npmrc` 的 `min-release-age=14` 当前是注释态**（上游临时关闭，理由写在文件里）；`engine-strict=true` 仍在 → node/npm 版本门仍是硬门。若上游重启 `min-release-age`，npm 12.0.2 已支持 `min-release-age-exclude`，无需再换版本。
 
 **pre-commit 的 ruff（2026-10-17 定案）**：本机任何 Hermes 环境里都没有 `ruff`，`lefthook` 的 `lint python` 会 `sh: ruff: not found`（exit 127）并让 commit 失败。已装 shim `~/.local/bin/ruff`，它从 `pyproject.toml` 的 dev 组读出 pin，用 `uvx --from ruff==<pin>` 执行：
 
