@@ -515,6 +515,37 @@ def _compute_host_slash(sid: str, session: dict, name: str, command: str) -> tup
     return "ok", str(ack.get("output") or "")
 
 
+def _quick_alias_target(session: dict, name: str, arg: str) -> tuple[str, str] | None:
+    """``(command, args)`` when *name* is an alias quick command (``/kimi`` -> ``/model …``), else None.
+
+    Alias quick commands are expanded client-side for ``command.dispatch``, but a name a client has
+    no native handler for reaches ``slash.exec`` first, whose worker runs the alias in its OWN
+    process: the switch succeeds there (and its output is printed) while the live session is left
+    untouched. Replaying the target here is what makes the alias real on this surface.
+    """
+    from hermes_cli.config import load_config_readonly
+    try:
+        # ``quick_commands`` is profile-keyed: one process serves every profile (#110695).
+        with _session_home_scope(session):
+            quick = (load_config_readonly().get("quick_commands") or {}).get(name.lower())
+    except Exception:  # health: allow BLE001 -- an unreadable config must not drop the command's own mirror
+        return None
+    if not isinstance(quick, dict) or quick.get("type") != "alias":
+        return None
+    target = str(quick.get("target") or "").strip().lstrip("/")
+    command, _, target_arg = target.partition(" ")
+    command = command.strip().lower()
+    if not command:  # a bare "/" target
+        return None
+    return command, " ".join(part for part in (target_arg.strip(), arg.strip()) if part)
+
+
+def _mirror_model_switch(sid, session, agent, arg) -> str:
+    """A ``/model`` switch replayed onto the live session. Unlike the typed mirror this accepts an
+    agent-less session: the pick lands in ``model_override`` and the first build consumes it."""
+    return _apply_model_switch(sid, session, arg).get("warning", "") if arg else ""
+
+
 def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     """Apply side effects that must also hit the gateway's live agent."""
     parts = command.lstrip("/").split(None, 1)
@@ -523,14 +554,23 @@ def _mirror_slash_side_effects(sid: str, session: dict, command: str) -> str:
     name, arg, agent = parts[0], (parts[1].strip() if len(parts) > 1 else ""), session.get("agent")
     if name == "compact":  # /compact aliases /compress; the compute-host control forwards the raw alias
         name = "compress"
-    if name in _MUTATES_WHILE_RUNNING:
-        if _session_uses_compute_host(session):
-            return _compute_host_slash(sid, session, name, command)[1]
-        if session.get("running"):
-            return busy_message(name, bool(session.get("_manual_compress_active")))
-    if (mirror := _SLASH_MIRRORS.get(name)) is None:
-        return ""
     try:
+        alias = _quick_alias_target(session, name, arg)
+        if alias is not None:
+            name, arg = alias
+            command = f"/{name} {arg}".strip()  # a compute host runs the resolved command, not the alias
+        if name in _MUTATES_WHILE_RUNNING:
+            if _session_uses_compute_host(session):
+                return _compute_host_slash(sid, session, name, command)[1]
+            if session.get("running"):
+                return busy_message(name, bool(session.get("_manual_compress_active")))
+        mirror = _SLASH_MIRRORS.get(name)
+        if alias is not None and name == "model":
+            # An alias may arrive before the session's first build, where the typed mirror's live-agent
+            # requirement would drop the pick instead of keeping it in ``model_override``.
+            mirror = _mirror_model_switch
+        if mirror is None:
+            return ""
         # Mirrors run OFF-turn (slash.exec RPC pool / compute-host control reader): bind the session's
         # profile scope or /model's credential read raises UnscopedSecretError under multiplex (#122655).
         with _session_profile_runtime_scope(session):

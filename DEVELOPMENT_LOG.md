@@ -4,6 +4,126 @@
 
 ---
 
+## 2026-10-25（第四十轮）: 主力模型切回 DeepSeek Flash（Kimi 降为备用）+ 新增 `/kimi` / `/ds` 主动切模型命令
+
+### 需求
+
+用户要求：主力模型切回 **deepseek-flash**，**Kimi K3.1 Pro 作备用**；并设计一个「主动调用 Kimi」的命令，形如 `/kimi`。
+
+### 方案判定（为什么不是新增一个 slash 命令）
+
+`/kimi` 若注册成注册表命令，要在 4 个 surface 各写一遍；而 Hermes 本来就支持 `quick_commands` 的
+`type: alias`（重新派发到另一个 slash 命令），四个面全部原生支持：
+
+| surface | 别名展开点 | 结果 |
+|---|---|---|
+| 终端 CLI | `cli.py::_run_quick_command`（`type=alias` → `process_command` 重派发） | `/kimi` → `/model …` → `_handle_model_switch` |
+| 消息网关（微信/QQ/…） | `gateway/run_inbound_hooks.py::_hm_expand_alias_quick_command`（改写 `event.text` 后重解析 canonical） | 同上，走 `_handle_model_command` |
+| TUI / 网页 dashboard | `ui-tui/src/app/createSlashHandler.ts`（`d.type === 'alias'` → `handler('/'+target)`） | 同上，走原生 `/model` 的 `session.mutate` |
+| 桌面端 | `apps/desktop/.../use-prompt-actions/slash.ts`（`dispatch.type === 'alias'` → `runSlash`） | 同上 |
+
+**但发现一处必须补代码的坑**：TUI/桌面/网页端对「自己没有原生处理器的命令」是**先**发 `slash.exec`，
+失败才回落到 `command.dispatch`。`slash.exec` 会把它交给**独立子进程 slash_worker**（一个独立
+`HermesCLI`）：worker 自己把模型切了、还把「✓ 已切换」打给客户端，而**实时会话纹丝不动** —— 典型的假成功。
+本轮唯一代码改动就是补这条镜像：`tui_gateway/methods_slash.py`。
+
+### 变更明细
+
+**1）8 个 home 的 `config.yaml`**（default + coding/exam/fitness/invest/music/topic1/work；`profiles/default`
+只有 memories/state.db、无 config，跳过）：
+
+```yaml
+model:
+  default: deepseek-flash          # 原 kimi-k3.1-pro
+  provider: deepseek               # 原 kimi-coding-cn
+  base_url: https://api.deepseek.com/v1
+fallback_providers:
+- {provider: kimi-coding-cn, model: kimi-k3.1-pro, base_url: https://api.moonshot.cn/v1}     # 备用
+- {provider: mimo, model: mimo-v2.6-pro, base_url: https://token-plan-cn.xiaomimimo.com/v1} # 二级兜底
+quick_commands:                    # 新增
+  kimi: {type: alias, target: /model kimi-k3.1-pro --provider kimi-coding-cn, description: 切到 Kimi K3.1 Pro（本会话；加 --global 写回配置）}
+  ds:   {type: alias, target: /model deepseek-flash --provider deepseek,   description: 切回 DeepSeek Flash 主力（本会话；加 --global 写回配置）}
+```
+
+- `agent.reasoning_effort: high` **保持不变**：DeepSeek V4 词表 `low/medium/high/max`
+  （`agent/reasoning_effort.py::DEEPSEEK_V4_EFFORTS`），`high` 合规。
+- `web.search_backend/extract_backend: kimi` **保持不动** —— 那是 Kimi 联网搜索插件，与主力模型无关。
+- `auxiliary.*`（22 个角色）原本就是 `deepseek/deepseek-flash`，无需改。
+- 写盘用 ruamel round-trip（先做无损往返验证：未改动时 `diff` **0 行**），再 tmp + `os.replace` 原子替换。
+
+**2）cron**：7 个显式钉住 kimi 的 job 全部改回 `--model deepseek-flash --provider deepseek --pin`
+（`74e39dc63d76` / `cb7bc4343e75` / `beeb41a12d4a` / `bc45a8b93f10` / `45b6d4f939f4` / `6b14c42d327f` / `8ba9432d913e`）。
+
+**3）`tui_gateway/methods_slash.py`（唯一代码改动，+41/−9）**：
+
+- 新增 `_quick_alias_target(session, name, arg)`：在**会话所属 home 作用域**（`_session_home_scope`，多 profile
+  共用一个进程时必需）读 `quick_commands`，把 `type: alias` 解成 `(目标命令, 目标参数 + 用户参数)`。
+- 新增 `_mirror_model_switch`：与既有 `_SLASH_MIRRORS["model"]` 的区别是**允许会话尚无 agent**
+  （首次发消息前）—— 这种情况 `_apply_model_switch` 把选择写进 `model_override`，首次建 agent 时消费；
+  既有 lambda 的 `arg and agent` 条件会把这种别名静默丢掉。
+- `_mirror_slash_side_effects`：别名解出后按目标命令走原有逻辑（`_MUTATES_WHILE_RUNNING` 忙时守卫仍生效，
+  不会在回合运行中换 client）；compute-host 场景转发**解析后的命令**（`/model …`）而非别名本身。
+- 新增 `tests/tui_gateway/test_quick_alias_mirror.py`（6 用例：别名重放、参数追加、`type: exec` 不展开、
+  非别名命令保持原路径、config 读失败降级、忙时会话不换 client）。
+
+### 验证
+
+| 项 | 结果 |
+|---|---|
+| 配置读回（`load_config`） | `model={'default':'deepseek-flash','provider':'deepseek',…}`；`fallback_providers` 2 条（kimi → mimo）；`quick_commands=['kimi','ds']` |
+| `hermes fallback` | `Primary: deepseek-flash (via deepseek)` / `1. kimi-k3.1-pro (via kimi-coding-cn)` / `2. mimo-v2.6-pro` |
+| 真实一次性对话 | `hermes chat -q '只回复两个字：正常'` → 3s；`state.db` 最新会话 `model=deepseek-flash`、`billing_provider=deepseek`、`billing_base_url=https://api.deepseek.com/v1`、`fallback_active=false` |
+| `/model` 目标解析（真 key） | `kimi-k3.1-pro --provider kimi-coding-cn` → success=True / key=yes；`deepseek-flash --provider deepseek` → success=True / key=yes |
+| 备用链真实解析 | `agent.auxiliary_client._resolve_fallback_entry({kimi-coding-cn…})` → OpenAI client，`base=https://api.moonshot.cn/v1/`，key=yes |
+| 费用确认弹窗 | `combined_selection_warning("kimi-k3.1-pro", …)` → **None**（`/kimi` 不弹「贵模型确认」，一步到位） |
+| 别名展开（网关） | `GatewayConfig.from_dict(真 config)` → `quick_commands=['kimi','ds']`；`/kimi` → `/model kimi-k3.1-pro --provider kimi-coding-cn`；`/kimi --global` 追加 `--global`；`/ds` → deepseek；`parse_model_switch_args` 全 OK |
+| 别名展开（CLI） | `HermesCLI._run_quick_command` 桩测：`/kimi`、`/kimi --global`、`/ds` 均重派发到正确的 `/model …`（`redispatch=True`） |
+| 运行时探针（server 命名空间） | `server._quick_alias_target(sess,'kimi','--global')` → `('model','kimi-k3.1-pro --provider kimi-coding-cn --global')`；`'ds'` → deepseek；`'stop'` → None |
+| 新测试 | `tests/tui_gateway/test_quick_alias_mirror.py` **6 passed** |
+| 相邻回归 | 新文件 + `test_compress_lock_skip` + `test_slash_worker_provider` + `test_multi_profile_hosting_fail_closed` = **24 passed / 0 failed** |
+| `ruff check`（改动文件） | All checks passed |
+| `scripts/check --only health` | 我的 BLE001 已清（一处收窄、一处 `# health: allow BLE001 -- …`）；**53 blocking 全是既存**（`cli_bridge_mixin` 20、`gateway/run_turn` 10、`dingtalk/adapter` 9、`plugins/web/kimi` 4 …，均非本轮文件） |
+| 网关重启 | PID `2549406` → **`3513190`**，`NRestarts=0`，`served_profiles` **8** |
+| dashboard 重启 | PID `2544672` → **`3560395`**，`NRestarts=0`，`/api/health` **200** |
+
+回滚包：`/tmp/kimi-switch/<ts>/`（`config.*.yaml` 9 份 + `jobs.json` + systemctl 状态），路径记在 `/tmp/kimi-switch/LATEST`。
+
+### 用法（给用户）
+
+```
+/kimi            本会话切到 Kimi K3.1 Pro（会话级，不改配置）
+/kimi --global   把 Kimi 写回 config.yaml 当主力
+/kimi --once     只下一轮用 Kimi
+/ds              切回 DeepSeek Flash（同样支持 --global / --once）
+/model …         原生完整用法（--provider / --reasoning / --refresh …）
+```
+
+⚠️ **不支持 `/kimi off`**：别名会把用户参数**追加**在目标之后，`off` 会变成模型名的一部分
+（`kimi-k3.1-pro off`）从而报错。要退回用 `/ds`。
+
+### 下次同步注意
+
+1. **`tui_gateway/methods_slash.py` 已列入私有重叠文件**：上游若改 `_mirror_slash_side_effects`，必须复核
+   `_quick_alias_target` 调用点仍在 `try` 内、`_MUTATES_WHILE_RUNNING` 守卫仍用**解析后**的 `name`，
+   且 `# health: allow BLE001` 那行没被吞掉（否则 `scripts/check` 会红）。
+2. `tests/tui_gateway/test_quick_alias_mirror.py` 是私有测试文件；上游若重写 `slash.exec`/mirror 结构，
+   这 6 个用例是「别名在实时会话生效」的唯一守卫。
+3. 别名方案依赖**上游 `quick_commands: type=alias` 语义**（CLI 重派发 / 网关改写 `event.text` / TUI·桌面
+   `type==='alias'` 客户端重放）。上游若改动任一实现，`/kimi` 会在该 surface 失效 —— 同步后按上表逐个复验。
+4. `web.search_backend: kimi` 与主力模型是两回事，别在同步时一起改。
+
+### 待办
+
+1. 用户在 TUI / 微信里实测 `/kimi`、`/ds`（我只做了桩测 + 运行时探针 + 单测；真实客户端点击路径未手工走）。
+2. 微信重启后首条通知失败（`iLink sendmessage session not ready … the user must send the bot a message first`）
+   属**重启后的既有现象**，用户发一条消息即恢复；另观测到 `gateway.shutdown_flush … FOREIGN KEY constraint failed`
+   1 次（旧进程遗留 pending 消息），本轮改动不涉及该路径，记录待查。
+3. 若以后要让 `/kimi` 支持 `off`/`status`/一次性提问，需改成注册表命令 + 四个 surface 各实现一遍（TUI/桌面是 TS），
+   成本远高于本次别名方案 —— 除非用户明确要。
+
+
+
+
 ## 2026-10-24（第三十九轮）: 主力模型切到 Kimi K3.1 Pro（deepseek-flash 备用）+ 新增 Kimi 联网搜索为主力搜索
 
 ### 需求

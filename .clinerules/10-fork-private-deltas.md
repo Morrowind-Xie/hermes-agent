@@ -7,6 +7,9 @@
 | `hermes_cli/cli_bridge_mixin.py` | 微信↔TUI 桥：bridge 状态字段、`/bridge` 分发、启动自动恢复、工具进度通知、对话镜像同步 |
 | `scripts/patch-assistant-ui-render-loop.mjs` | 根 `package.json` postinstall 里挂的 assistant-ui 渲染环补丁 |
 | `plugins/web/kimi/{provider.py,__init__.py,plugin.yaml}` | Kimi（Moonshot）联网搜索 provider：`web.search_backend: kimi` / `web.extract_backend: kimi`；Basic `/v1/tools/search`（`web.kimi.search: basic`）+ Pro `/v1/tools/search_pro`（默认）+ `/v1/tools/fetch`；key 取 `MOONSHOT_API_KEY` → `KIMI_CN_API_KEY` → `KIMI_API_KEY`。测试 `tests/tools/test_web_providers_kimi.py`。**上游若新增同名 `plugins/web/kimi/` 会在同步时冲突** → 让路时把本站 provider 改名 `kimi-cn` 并同步改 8 个 home 的 `web.*_backend` |
+| `tests/tui_gateway/test_quick_alias_mirror.py` | 「别名 quick command 必须在**实时会话**生效」的守卫（见下行）；6 用例。上游若重写 `slash.exec`/mirror 结构，这是唯一防线 |
+| `tui_gateway/methods_slash.py`（**改上游文件**） | 私有补丁：`_quick_alias_target()` + `_mirror_model_switch()`，并在 `_mirror_slash_side_effects()` 里把 `quick_commands: type=alias` 解析成目标命令后**重放到实时会话**。原因：TUI/桌面/网页端先把未知命令送 `slash.exec` → 独立 `slash_worker` 子进程自己切模型（只改自己），客户端却打印"已切换" = 假成功。`_quick_alias_target` 里有一行 `# health: allow BLE001 -- …` 白名单，**同步时不可被删**（否则 `scripts/check` 红） |
+| 8 个 home 的 `config.yaml` `quick_commands` | `/kimi` → `/model kimi-k3.1-pro --provider kimi-coding-cn`；`/ds` → `/model deepseek-flash --provider deepseek`（`type: alias`，`--global`/`--once` 可追加）。上游若改别名语义（CLI 重派发 / 网关 `_hm_expand_alias_quick_command` / TUI·桌面 `dispatch.type==='alias'`），这些命令会在对应 surface 失效 |
 
 每轮同步后检查是否仍在、是否仍被引用：
 
@@ -15,6 +18,9 @@ for f in hermes_cli/cli_bridge_mixin.py scripts/patch-assistant-ui-render-loop.m
   [ -f "$f" ] && echo "ok $f" || echo "MISSING $f"; done
 grep -n 'def _handle_bridge_command' hermes_cli/cli_bridge_mixin.py
 find node_modules/@assistant-ui -name subscribable.js -exec grep -c 'hermes-render-loop-patch' {} + | head -1
+# /kimi 别名 → 实时会话重放（R4 新增）：期望 ('model','kimi-k3.1-pro --provider kimi-coding-cn') /
+# ('model','deepseek-flash --provider deepseek')。必须带 PYTHONPATH=<repo> 与 3.14 PM 解释器（R13）
+PYTHONPATH=<repo> <PM python> -c "from tui_gateway import server; s={'session_key':'k'}; print(server._quick_alias_target(s,'kimi',''), server._quick_alias_target(s,'ds',''))"
 ```
 
 > **2026-10-17 起：`apps/desktop/electron/pool-eviction.ts` (+ `.test.ts`) 已退役。** 上游
@@ -44,6 +50,7 @@ BASE=<上次上游 tip> REF=<合并前 HEAD> ./venv/bin/python <verify_private.p
 - `hermes_cli/main_desktop.py` —— 我们放 `source` 启动的 `desktop.electron_flags`；上游反复重构启动实现
 - `tests/hermes_cli/test_gui_command.py` —— 我们的 2 个 `electron_flags` 测试；上游反复重写该文件
 - `agent/auxiliary_client.py`、`apps/desktop/electron/main.ts`、`apps/desktop/src/i18n/*.ts`
+- `tui_gateway/methods_slash.py` —— 我们把 `quick_commands: type=alias` 重放到实时会话（`_quick_alias_target` / `_mirror_model_switch`，且塞进 `_mirror_slash_side_effects` 的 `try` 内）；上游反复改 `_mirror_slash_side_effects` 的 mirror 表与忙时守卫
 
 **零文本冲突 ≠ 零复核。** 每个重叠文件都要回答两件事：
 
