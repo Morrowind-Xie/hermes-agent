@@ -136,16 +136,33 @@ WARNING tools.mcp_tool: Failed to connect to MCP server 'tdx':
 - 报错首次出现于本轮 19:42 的重启（`PID 400` 是很早启动的旧进程，日志已轮转，其启动期是否报过无法回溯）。与删除 `.venv` 无关（`eltdx-mcp` 属于 `venv`，我们没动 `venv`）。
 - 处置选项（未擅自执行）：① 装 `eltdx-mcp` 到可用环境；② 或从 8 个 profile 的 config 移除/注释 tdx MCP。
 
+**4. `venv` 已移出仓库根 ✅（用户批准后执行，20:55-21:05）**
+
+- 回滚包 `/tmp/rb/20261106-205549-venvmove`：两个 unit 原文 + 服务状态 + `venv` 的 `pip freeze`（**136 包**）+ **8 个 `config.yaml` 备份**。
+- `stat -c '%d'` 确认 `venv`、仓库根、`/home/morrowind` 的 `st_dev` 全是 **2096** → `mv` 是 rename，运行中的 dashboard 不受影响（实测 `mv` 耗时 **0.003s**）。
+- `dashboard.service`：`ExecStart=…/hermes-agent/venv/bin/python3` → `…/venvs/dashboard-venv/bin/python3`。
+- `hermes-webui.service`：`PATH` 与 `VIRTUAL_ENV` 同步改到 `…/venvs/dashboard-venv`。
+- 顺序：`daemon-reload` → `mv venv ~/venvs/dashboard-venv` → 重启 dashboard（新 PID **1451751**，active/running）→ 重启 webui（新 PID **1452620**，NRestarts=0）。端口实测：**9119 → 200**、**8888 → 200**。
+
+**⚠ 移动 venv 造成、当场修复的连带破坏**：unit 之外还有 **2 处**引用，8 个 profile 各有 2 处 —— 其中 `deerflow` MCP 的 `command: …/venv/bin/python3`（跑用户的 `~/My_Projects/TradingAgents/deerflow_mcp.py`）会**直接失效**。
+已 `sed -i` 把 8 个 config 的 `hermes-agent/venv` → `venvs/dashboard-venv`（残留 0 / 新引用 2），重启 gateway（新 PID **1463215**，served 8，NRestarts=0）后：
+- `deerflow` 无任何 warn（连接成功）；并用新解释器实测 `import`：`deerflow_mcp import OK, attrs: ['DEERFLOW','MCP','TOKEN','api','asyncio','deerflow_research']`
+- `tdx` 仍报 missing（既有问题，文件本来就不存在；路径已随迁移更新）
+
+**核心收益实测**：
+- `pm.extras.legacy_selection(repo_root())`：15 个 extras → **`['all']`**（`_first_selection` 对 `['all']` 有特判 → carried 归空）
+- `tests/pm/test_install_extra.py` + `test_install_default_closure.py`：**17 passed / 0 failed**（此前 5 红）
+- 仓库根 `venv`/`.venv` 均已不存在；`grep -rn 'hermes-agent/venv' ~/.config/systemd/user/ ~/.hermes/config.yaml ~/.hermes/profiles/*/config.yaml` **全部为空**
+
 ### 待办
 
-1. **【需用户决定】** `venv`(823M) 是否移出仓库根（`~/venvs/dashboard-venv`）+ 改 `dashboard.service` 的 `ExecStart` 与 `hermes-webui.service` 的 `PATH`/`VIRTUAL_ENV`。移出后可同时消除 5 个 `pm` 测试失败与「`hermes install` 携带 15 extras」的风险；代价是要重启用户的 dashboard 服务。
-2. **【需用户决定】** `tdx` MCP 指向缺失的 `venv/bin/eltdx-mcp`：装包还是从 8 个 profile 的 config 移除。
+1. **【需用户决定】** `tdx` MCP 指向缺失的 `eltdx-mcp`（现路径 `~/venvs/dashboard-venv/bin/eltdx-mcp`，该文件不存在）：装包，还是从 8 个 profile 的 config 移除该 MCP。
+2. **【已做】** `venv` 移出仓库根 → `~/venvs/dashboard-venv`；`dashboard.service` + `hermes-webui.service` 两处 unit 已改；8 个 `config.yaml` 引用已同步；`.venv`(3.11) 已删。
 3. **【已做】** 8 个 profile 装 `hermes-session-reset-policy` 并验证生效（警告 0 条）。
-4. **【已做】** 删除 `.venv`(3.11)。
-5. **【已做】** `.clinerules` 三份同步更新：R1 正则、R2 验证链命令、R4 补丁挂载点与 pnpm 落点、R14 全面改写为 pnpm 12.15.0。
-6. **【未做】** 桌面端未重启：本机无 desktop 进程在跑，用户下次启动即用新构建。gateway 本轮共重启 2 次，各中断微信桥约 20-50 秒。
-7. **【未做】** `hermes pm install` 未单独跑：`scripts/run_tests.sh` 已因 `pyproject.toml`/`pm/lock.json`/`uv.lock` 的 mtime 变化自动重建并提交了 PM 环境与 test environment（日志 `✓ Tools + dependencies installed`），`./.hermes/bin/hermes --version` 已验证可用。
-8. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）与 `/tmp/rb/20261106-185143`（回滚包）保留中；确认无误后可 `git worktree remove /tmp/basecheck`。
+4. **【已做】** `.clinerules` 三份同步更新：R1 正则、R2 验证链命令、R4 补丁挂载点与 pnpm 落点、R14 全面改写为 pnpm 12.15.0。
+5. **【未做】** 桌面端未重启：本机无 desktop 进程在跑，用户下次启动即用新构建。gateway 本轮共重启 **3** 次，各中断微信桥约 20-50 秒。
+6. **【未做】** `hermes pm install` 未单独跑：`scripts/run_tests.sh` 已因 `pyproject.toml`/`pm/lock.json`/`uv.lock` 的 mtime 变化自动重建并提交了 PM 环境与 test environment（日志 `✓ Tools + dependencies installed`），`./.hermes/bin/hermes --version` 已验证可用。
+7. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）、`/tmp/rb/20261106-185143`（同步回滚包）、`/tmp/rb/20261106-205549-venvmove`（venv 迁移回滚包）保留中。
 
 
 ## 2026-10-30（第四十一轮）: 同步上游 2577 提交（零文本冲突）+ JS 工具链升到 node 26 / npm 12
