@@ -5,7 +5,7 @@
 | 文件 | 作用 |
 |---|---|
 | `hermes_cli/cli_bridge_mixin.py` | 微信↔TUI 桥：bridge 状态字段、`/bridge` 分发、启动自动恢复、工具进度通知、对话镜像同步 |
-| `scripts/patch-assistant-ui-render-loop.mjs` | 根 `package.json` postinstall 里挂的 assistant-ui 渲染环补丁 |
+| `scripts/patch-assistant-ui-render-loop.mjs` | 根 `package.json` **postinstall** 里挂的 assistant-ui 渲染环补丁（上游 2026-11-06 重写 postinstall 时把这行删掉了，同步时必须挂回去）。⚠ pnpm 布局下补丁目标是 `apps/desktop/node_modules/@assistant-ui/core/...`（symlink → `.pnpm` store），**不在**根 `node_modules`；且必须先清空 npm 遗留树，否则脚本命中陈旧副本打印假 `already applied`（见 `20-pm-and-runtime.md` R14） |
 | `plugins/web/kimi/{provider.py,__init__.py,plugin.yaml}` | Kimi（Moonshot）联网搜索 provider：`web.search_backend: kimi` / `web.extract_backend: kimi`；Basic `/v1/tools/search`（`web.kimi.search: basic`）+ Pro `/v1/tools/search_pro`（默认）+ `/v1/tools/fetch`；key 取 `MOONSHOT_API_KEY` → `KIMI_CN_API_KEY` → `KIMI_API_KEY`。测试 `tests/tools/test_web_providers_kimi.py`。**上游若新增同名 `plugins/web/kimi/` 会在同步时冲突** → 让路时把本站 provider 改名 `kimi-cn` 并同步改 8 个 home 的 `web.*_backend` |
 | `tests/tui_gateway/test_quick_alias_mirror.py` | 「别名 quick command 必须在**实时会话**生效」的守卫（见下行）；6 用例。上游若重写 `slash.exec`/mirror 结构，这是唯一防线 |
 | `tui_gateway/methods_slash.py`（**改上游文件**） | 私有补丁：`_quick_alias_target()` + `_mirror_model_switch()`，并在 `_mirror_slash_side_effects()` 里把 `quick_commands: type=alias` 解析成目标命令后**重放到实时会话**。原因：TUI/桌面/网页端先把未知命令送 `slash.exec` → 独立 `slash_worker` 子进程自己切模型（只改自己），客户端却打印"已切换" = 假成功。`_quick_alias_target` 里有一行 `# health: allow BLE001 -- …` 白名单，**同步时不可被删**（否则 `scripts/check` 红） |
@@ -17,7 +17,9 @@
 for f in hermes_cli/cli_bridge_mixin.py scripts/patch-assistant-ui-render-loop.mjs; do
   [ -f "$f" ] && echo "ok $f" || echo "MISSING $f"; done
 grep -n 'def _handle_bridge_command' hermes_cli/cli_bridge_mixin.py
-find node_modules/@assistant-ui -name subscribable.js -exec grep -c 'hermes-render-loop-patch' {} + | head -1
+# render-loop 补丁：pnpm 布局下目标在 desktop workspace（期望 1），根 node_modules 必须没有陈旧副本
+grep -c 'hermes-render-loop-patch' apps/desktop/node_modules/@assistant-ui/core/dist/subscribable/subscribable.js
+ls node_modules/@assistant-ui 2>/dev/null && echo '⚠ 根 node_modules 有陈旧 npm 副本，补丁会假阳性' || echo 'ok 根 node_modules 干净'
 # /kimi 别名 → 实时会话重放（R4 新增）：期望 ('model','kimi-k3.1-pro --provider kimi-coding-cn') /
 # ('model','deepseek-flash --provider deepseek')。必须带 PYTHONPATH=<repo> 与 3.14 PM 解释器（R13）
 PYTHONPATH=<repo> <PM python> -c "from tui_gateway import server; s={'session_key':'k'}; print(server._quick_alias_target(s,'kimi',''), server._quick_alias_target(s,'ds',''))"

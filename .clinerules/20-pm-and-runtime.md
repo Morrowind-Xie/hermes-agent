@@ -113,21 +113,36 @@ ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open
 
 **排查口诀**：看到 `pydantic_core._pydantic_core` / `mcp` / `_cffi_backend` 缺失的报错，**先查启动命令的解释器版本**，不要去 pip 装包。
 
-## R14 · JS 依赖安装固定走 PM store 的 Node 26.12.1 + npm 12.0.2（2026-10-30 改定）
+## R14 · JS 依赖安装固定走 pnpm 12.15.0 + PM store 的 Node 26.12.1（2026-11-06 改定）
 
-**背景**：上游 `.npmrc` 设 `engine-strict=true`；**root 与 `apps/desktop` 的 `engines.node = ">=26"`**、`engines.npm = "<11.10.0 || >=11.17.0"`（`8e08a4a16e` 有意排除 npm 11.10–11.16：那些版本支持 `min-release-age` 却不支持 `min-release-age-exclude`）、`.nvmrc` = `26`。
+**背景：上游已从 npm 迁移到 pnpm**（`53a6ced422` `chore/pnpm-switch`）。`package-lock.json` 与 `.npmrc` 已被删除，取而代之 `pnpm-lock.yaml` + `pnpm-workspace.yaml`（`engineStrict` / `minimumReleaseAge: 20160` / `sideEffectsCache: false` / `strictDepBuilds: true` 全在里面）。根 `package.json` 的 `preinstall` 会 `exit(1)` 拒绝任何非 pnpm 安装。
 
-**2026-10-30 起旧的 nvm 路径已失效**：本机 nvm 只有 node **22.22.0（npm 10.9.4）/ 24.13.0（npm 11.12.1）**，node 都不满足 `>=26`，全局 npm 11.12.1 又落在排除带 → `npm ci` 一律 `EBADENGINE`。pm store 已备 **`node-26.12.1-linux-x64`** 与 **`npm-12.0.2-linux-x64`**（`>=11.17.0` 分支），零额外安装。
+**版本门是硬门**：`devEngines.packageManager = {name: pnpm, version: "12.15.0"}`；`pnpm-workspace.yaml` 设了 `pmOnFail: ignore`（为让 lock 保持单 YAML 文档），于是 `scripts/build/node-deps.mjs:113` 自己再校验一次：`pnpm 12.15.0 is required (root package.json devEngines), found <ver> at <path>` → throw。
 
-**规则**：凡 `npm ci` / `npm install` 类**安装**动作，前置 PATH（安装 + 运行 tsc/eslint/vitest/build 一律用它，省得两套 node 打架）：
+**本机布局（2026-11-06 定案，零额外安装已就位）**：
+- node 26.12.1：`~/.hermes/tools/node-26.12.1-linux-x64`（`engines.node = ">=26"`）
+- pnpm 12.15.0：`~/.hermes/tools/pnpm-12.15.0-linux-x64`，`bin/pnpm` → `node_modules/pnpm/pnpm`（57 MB native 二进制）
+  - 安装方式：`npm install --prefix <该目录> pnpm@12.15.0`。npm 12 的 allowScripts 会**跳过** pnpm 的 `install.js`，但包内已自带 linux-x64 二进制，`bin/` 手动 `ln -sf ../node_modules/pnpm/pnpm bin/pnpm` 即可。
+- 系统 `/usr/local/bin/pnpm` 是 **10.28.2，不满足**；只有 PATH 前缀正确时才不会被它抢先。
+
+**规则**：安装 + 运行 tsc/eslint/vitest/build 一律用同一条 PATH 前缀：
 
 ```bash
-PATH="$HOME/.hermes/tools/node-26.12.1-linux-x64/bin:$HOME/.hermes/tools/npm-12.0.2-linux-x64/bin:$PATH" npm ci
+export PATH="$HOME/.hermes/tools/node-26.12.1-linux-x64/bin:$HOME/.hermes/tools/pnpm-12.15.0-linux-x64/bin:$PATH"
+pnpm install --frozen-lockfile
 ```
 
-**实测（2026-10-30 第四十一轮）**：node 26.12.1 + npm 12.0.2 下 `npm ci` = added 1288 packages / 44s / `rc=0`，postinstall 的 render-loop 补丁 `applied`；随后 desktop `typecheck rc=0`、desktop `eslint --quiet rc=0`、`vitest run --project electron` 4041 用例中 1 failed（`scripts/mac-sign.test.mjs`：WSL2 内核串 `6.18.33.2-microsoft-standard-WSL2` 被 `@electron/osx-sign` 当 semver 解析 —— 合并前 `@electron/osx-sign` 同为 2.4.0、该测试文件未被上游改动，**环境性既有失败**）、web typecheck + lint 0 error、ui-tui typecheck + lint 0 error + i18n keys fresh、web build / desktop build `rc=0`。
+❌ 不要 `npm ci` / `npm install`：`preinstall` 会直接拒绝。
 
-**`.npmrc` 的 `min-release-age=14` 当前是注释态**（上游临时关闭，理由写在文件里）；`engine-strict=true` 仍在 → node/npm 版本门仍是硬门。若上游重启 `min-release-age`，npm 12.0.2 已支持 `min-release-age-exclude`，无需再换版本。
+**⚠ npm → pnpm 迁移必须清空旧树（2026-11-06 实测事故）**：第一次 `pnpm install` 只在旧 npm 树**旁边**建了 `.pnpm/` 与 symlink，**没有**清理 npm 留下的 760 个真实目录（含 `node_modules/@assistant-ui/core`）。后果不是报错而是**静默错位**：
+- `scripts/patch-assistant-ui-render-loop.mjs` 的 `resolveTarget()` 先命中根 `node_modules`，读到**陈旧的已打补丁副本** → 打印 `already applied`（假阳性），而 desktop 实际用的 `.pnpm` 副本**没有补丁** → 渲染环 bug 会静默回来。
+- 正确姿势：先 `rm -rf node_modules apps/*/node_modules ui-tui/node_modules ui-tui/packages/*/node_modules web/node_modules tests-js/node_modules`，再 `pnpm install --frozen-lockfile`（store warm 时 5.4s）。
+- 补丁落点也随之改变：pnpm 严格隔离下 `@assistant-ui/core` **只在** `apps/desktop/node_modules/`，不在根；写入会穿透 symlink 改 content-addressable store 里的真实文件（`sideEffectsCache: false` 只保护依赖构建脚本，不保护这个）。
+- **`@assistant-ui/core` 上游仍 pin 0.2.23（未修）→ 补丁不可删**；脚本检测到 `shallowEqualOrUndefined` 才会自动转 no-op。
+
+**实测（2026-11-06 第四十二轮）**：pnpm 12.15.0 + node 26.12.1 → `pnpm install --frozen-lockfile` 覆盖全部 8 个 workspace、1121 包、16.9s，`✓ Lockfile passes supply-chain policies (1209 entries in 11.4s)`；清树重装 5.4s，postinstall 打印 `✓ assistant-ui render-loop patch: applied to @assistant-ui/core`。
+
+**历史（npm 时代，仅作回滚材料）**：2026-10-30 ~ 11-05 用 `~/.hermes/tools/npm-12.0.2-linux-x64` + `engines.npm = "<11.10.0 || >=11.17.0"`，`npm ci` = 1288 包 / 44s。上游已删掉 `engines.npm` 与那份 `.npmrc`，**不要再照那套执行**。
 
 **pre-commit 的 ruff（2026-10-17 定案）**：本机任何 Hermes 环境里都没有 `ruff`，`lefthook` 的 `lint python` 会 `sh: ruff: not found`（exit 127）并让 commit 失败。已装 shim `~/.local/bin/ruff`，它从 `pyproject.toml` 的 dev 组读出 pin，用 `uvx --from ruff==<pin>` 执行：
 

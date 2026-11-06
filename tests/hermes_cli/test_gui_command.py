@@ -1238,13 +1238,15 @@ def _prepare_source_launch_tree(tmp_path: Path) -> tuple[Path, Path]:
 
     The source launch no longer goes through ``npm exec``: it reads the installed
     Electron package's ``path.txt`` and starts that executable directly, so a
-    source launch and a packaged launch differ only by argv.
+    source launch and a packaged launch differ only by argv. pnpm links Electron
+    into the desktop workspace (where ``electronDist`` points), never into the
+    root, so the fixture must mirror that layout.
     """
     root = _make_desktop_tree(tmp_path)
     desktop = root / "apps" / "desktop"
     (desktop / "dist").mkdir()
     (desktop / "dist" / "index.html").write_text("prepared renderer", encoding="utf-8")
-    electron = root / "node_modules" / "electron"
+    electron = desktop / "node_modules" / "electron"
     (electron / "dist").mkdir(parents=True)
     (electron / "package.json").write_text("{}", encoding="utf-8")
     executable = electron / "dist" / "electron"
