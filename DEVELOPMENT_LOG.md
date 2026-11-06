@@ -104,14 +104,48 @@ desktop build 的两条既有告警（非本轮引入）：`[hud-modifier] unava
 6. **仓库根遗留 `venv`/`.venv`** 会污染 `pm` 的 `legacy_selection`（5 个测试红 + `hermes install` 会携带 15 个 extras）。R13 已判定两者都不可用（3.11 缺 `mcp`/`_cffi_backend`，3.12 缺 `mcp`），但**未自动删除**（等用户授权）。
 7. **pre-commit 钩子**：`lefthook.yml` 已改 `pnpm exec eslint`，同步类大提交仍需 `--no-verify`（2728 个上游文件必然是噪声），但**独立的定向 typecheck/eslint 一步都不能省**。
 
+### 后续操作（同日 20:40-20:50，用户批准）
+
+**1. 删除遗留 `.venv`(3.11) ✅ / `venv`(3.12) ⛔ 未删**
+
+删前核查发现我的先前判断有误，**`venv` 并不是无人使用的遗留物**：
+
+| 目录 | 体积 | 实际用途 | 处置 |
+|---|---|---|---|
+| `.venv` (3.11) | 128M | 无 unit/env/shell 引用、无进程占用、**连 `pip` 都没有**（`No module named pip`） | **已删除** |
+| `venv` (3.12) | 823M | ① `dashboard.service`（用户的 `~/My_Projects/dashboard/app.py`）**正用它运行**，PID 394 已跑 1 天 6 小时；② `hermes-webui.service` 的 `PATH` 与 `VIRTUAL_ENV` 都指向它 | **未删**（等用户决定） |
+
+删除 `.venv` 后 `git status` 仍干净（`.gitignore:15` 覆盖）。⚠ 但**只删 `.venv` 不解决问题**：`pm.extras.legacy_selection()` 同时扫 `venv` 与 `.venv`，`venv` 还在 → 仍返回 15 个 extras，5 个 `pm` 测试仍红。
+可行解法（需用户决定，因为会重启用户的 dashboard）：把 `venv` 移出仓库（如 `~/venvs/dashboard-venv`），同步改 `dashboard.service` 的 `ExecStart` 与 `hermes-webui.service` 的 `PATH`/`VIRTUAL_ENV`。
+
+**2. 8 个 profile 安装 `hermes-session-reset-policy` ✅**
+
+- catalog 条目 `plugin-catalog/hermes-session-reset-policy.yaml`：`community` / `fastfinge` / SHA `0f2ea5ad` / v0.3.0 / `pre_gateway_dispatch` hook / 无 Python 依赖。
+- 逐个装（主 CLI **没有**全局 `--profile`，用 `HERMES_HOME` 切）：`HERMES_HOME=<home> ./.hermes/bin/hermes plugins install hermes-session-reset-policy --yes-deps --enable`。
+- 结果：`plugins list --json` 逐 profile 校验 → **8/8 `enabled`**（default/coding/exam/fitness/invest/music/topic1/work）；`~/.hermes/config.yaml:521` 记录了启用项。
+- 验证：重启 gateway（新 PID **1426300**、`state=running`、served **8**、NRestarts=0）后，`session_reset.mode: both is no longer applied` 警告计数 = **0**（安装前 8 条）→ 插件确实接管。
+
+**3. ⚠ 重启暴露的既有问题（非本次引入，需用户决定）**
+
+```
+WARNING tools.mcp_tool: Failed to connect to MCP server 'tdx':
+  command=/home/morrowind/hermes-agent/venv/bin/eltdx-mcp
+  missing executable … (FileNotFoundError)
+```
+- `venv/bin/eltdx-mcp` 不存在，**全机 `find` 也搜不到**；而 **8 个 profile 的 `config.yaml` 全都配了 `eltdx-mcp`**。
+- 报错首次出现于本轮 19:42 的重启（`PID 400` 是很早启动的旧进程，日志已轮转，其启动期是否报过无法回溯）。与删除 `.venv` 无关（`eltdx-mcp` 属于 `venv`，我们没动 `venv`）。
+- 处置选项（未擅自执行）：① 装 `eltdx-mcp` 到可用环境；② 或从 8 个 profile 的 config 移除/注释 tdx MCP。
+
 ### 待办
 
-1. **【需用户确认】** 是否删除仓库根 `venv`(3.12) / `.venv`(3.11)：删掉可同时消除 5 个测试失败与「`hermes install` 携带 15 extras」的生产风险。
-2. **【需用户确认】** 是否为 8 个 profile 安装 `hermes-session-reset-policy` 插件以恢复空闲/每日重置。
-3. **【已做】** `.clinerules` 三份同步更新：R1 正则、R2 验证链命令、R4 补丁挂载点与 pnpm 落点、R14 全面改写为 pnpm 12.15.0。
-4. **【未做】** 桌面端未重启：本机无 desktop 进程在跑（`ps` 只见到 gateway/webui），用户下次启动即用新构建。gateway 重启已中断微信桥约 20 秒。
-5. **【未做】** `hermes pm install` 未单独跑：`scripts/run_tests.sh` 已因 `pyproject.toml`/`pm/lock.json`/`uv.lock` 的 mtime 变化自动重建并提交了 PM 环境与 test environment（日志 `✓ Tools + dependencies installed`），`./.hermes/bin/hermes --version` 已验证可用。
-6. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）与 `/tmp/rb/20261106-185143`（回滚包）保留中；确认无误后可 `git worktree remove /tmp/basecheck`。
+1. **【需用户决定】** `venv`(823M) 是否移出仓库根（`~/venvs/dashboard-venv`）+ 改 `dashboard.service` 的 `ExecStart` 与 `hermes-webui.service` 的 `PATH`/`VIRTUAL_ENV`。移出后可同时消除 5 个 `pm` 测试失败与「`hermes install` 携带 15 extras」的风险；代价是要重启用户的 dashboard 服务。
+2. **【需用户决定】** `tdx` MCP 指向缺失的 `venv/bin/eltdx-mcp`：装包还是从 8 个 profile 的 config 移除。
+3. **【已做】** 8 个 profile 装 `hermes-session-reset-policy` 并验证生效（警告 0 条）。
+4. **【已做】** 删除 `.venv`(3.11)。
+5. **【已做】** `.clinerules` 三份同步更新：R1 正则、R2 验证链命令、R4 补丁挂载点与 pnpm 落点、R14 全面改写为 pnpm 12.15.0。
+6. **【未做】** 桌面端未重启：本机无 desktop 进程在跑，用户下次启动即用新构建。gateway 本轮共重启 2 次，各中断微信桥约 20-50 秒。
+7. **【未做】** `hermes pm install` 未单独跑：`scripts/run_tests.sh` 已因 `pyproject.toml`/`pm/lock.json`/`uv.lock` 的 mtime 变化自动重建并提交了 PM 环境与 test environment（日志 `✓ Tools + dependencies installed`），`./.hermes/bin/hermes --version` 已验证可用。
+8. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）与 `/tmp/rb/20261106-185143`（回滚包）保留中；确认无误后可 `git worktree remove /tmp/basecheck`。
 
 
 ## 2026-10-30（第四十一轮）: 同步上游 2577 提交（零文本冲突）+ JS 工具链升到 node 26 / npm 12
