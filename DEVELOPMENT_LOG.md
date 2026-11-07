@@ -154,15 +154,42 @@ WARNING tools.mcp_tool: Failed to connect to MCP server 'tdx':
 - `tests/pm/test_install_extra.py` + `test_install_default_closure.py`：**17 passed / 0 failed**（此前 5 红）
 - 仓库根 `venv`/`.venv` 均已不存在；`grep -rn 'hermes-agent/venv' ~/.config/systemd/user/ ~/.hermes/config.yaml ~/.hermes/profiles/*/config.yaml` **全部为空**
 
+**5. 删除 `mcp_servers.tdx`（用户选定"方案 1"，2026-11-07 09:01-09:05）**
+
+先查清了 `eltdx-mcp` 到底是什么（此前只知道它缺失）：
+
+- **PyPI 上 `eltdx-mcp` = HTTP 404**（非公开包）
+- 迁移前那个 venv 的 **136 个 pip 包里从未有过** `eltdx`/`tdx` 相关；`~/.bash_history`、`~/.cache/pip` 也无任何痕迹 → **它一直是坏的，不是 venv 迁移弄坏的**
+- 你项目里的证据链（三条独立来源）：`invest/scripts/indicators_batch.py` 用 `http://localhost:8899` 拉日线 K 线算 MACD/KDJ/RSI/MA；`dashboard/data/monitor_inventory.json` 列有 `tdx-tq-bridge (8899)` / `tdx-akshare-bridge (8898)`，备注「TDx 桥 8898/8899 按约定手动启动，down 属预期」「需先启通达信客户端」；`dashboard/.../signal_log_parser.py` 把 `eltdx` 与 `TdxQuant`/`tdx.py`/`AKShare`/`MACD` 并列作投资方向关键词
+- → 它是「把通达信 A 股数据包成 MCP server」的自建/本地工具。连不上属**软失败**（`parking without retries`，只写 WARNING），所以一直没被察觉，只是那组工具静默不可用
+
+处理（**文本级删除**，不用 YAML 解析后重写 —— 那会丢注释、缩进与键序）：
+
+- 回滚包 `/tmp/rb/20261107-090158-rmtdx`（8 个 config 原文）
+- 脚本 `/tmp/rmtdx.py`：只删 `  tdx:` 行 + 其后缩进 > 2 的续行（遇空行/同级键即停）→ **8/8 各删 1 块**
+- 校验 `/tmp/check_rmtdx.py`（ruamel.yaml，PM 环境无 pyyaml）：8/8 `mcp_servers=['deerflow','scrapling','word-bridge']`、`bridge` 键完好、无语法错误
+- 重启 gateway（新 PID **2065938**、`state=running`、served 8、NRestarts=0）
+
+验证（`journalctl -n 400` 落盘后**按 PID 区分**，这一步很关键）：
+
+| 指标 | 结果 |
+|---|---|
+| 新进程 `2065938` 的 `eltdx` 警告 | **0** |
+| 旧进程 `1463215`（重启前日志）的 `eltdx` 警告 | 16（历史，已不影响） |
+| `deerflow` 报错 | 0 |
+| `session_reset ... no longer applied` | 0 |
+| 新进程 traceback | 0（唯一 1 条来自旧进程 21:07 的 cron tool 输出） |
+
 ### 待办
 
-1. **【需用户决定】** `tdx` MCP 指向缺失的 `eltdx-mcp`（现路径 `~/venvs/dashboard-venv/bin/eltdx-mcp`，该文件不存在）：装包，还是从 8 个 profile 的 config 移除该 MCP。
+1. **【已做】** 删除 8 个 profile 的 `mcp_servers.tdx`（用户选方案 1）→ gateway 启动日志不再刷 30+ 条 WARNING。
 2. **【已做】** `venv` 移出仓库根 → `~/venvs/dashboard-venv`；`dashboard.service` + `hermes-webui.service` 两处 unit 已改；8 个 `config.yaml` 引用已同步；`.venv`(3.11) 已删。
 3. **【已做】** 8 个 profile 装 `hermes-session-reset-policy` 并验证生效（警告 0 条）。
 4. **【已做】** `.clinerules` 三份同步更新：R1 正则、R2 验证链命令、R4 补丁挂载点与 pnpm 落点、R14 全面改写为 pnpm 12.15.0。
-5. **【未做】** 桌面端未重启：本机无 desktop 进程在跑，用户下次启动即用新构建。gateway 本轮共重启 **3** 次，各中断微信桥约 20-50 秒。
+5. **【未做】** 桌面端未重启：本机无 desktop 进程在跑，用户下次启动即用新构建。gateway 本轮共重启 **4** 次，各中断微信桥约 20-55 秒。
 6. **【未做】** `hermes pm install` 未单独跑：`scripts/run_tests.sh` 已因 `pyproject.toml`/`pm/lock.json`/`uv.lock` 的 mtime 变化自动重建并提交了 PM 环境与 test environment（日志 `✓ Tools + dependencies installed`），`./.hermes/bin/hermes --version` 已验证可用。
-7. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）、`/tmp/rb/20261106-185143`（同步回滚包）、`/tmp/rb/20261106-205549-venvmove`（venv 迁移回滚包）保留中。
+7. **【可选，未做】** 若将来要恢复 A 股工具能力：把 `eltdx` 源码/wheel 装到 `~/venvs/dashboard-venv`，再在 config 加回 `mcp_servers.tdx`；注意通达信客户端未启动时它仍连不上（8898/8899 按约定手动启动）。
+8. **【临时物】** `/tmp/basecheck`（git worktree，base 对照用）、`/tmp/rb/20261106-185143`（同步回滚包）、`/tmp/rb/20261106-205549-venvmove`（venv 迁移回滚包）、`/tmp/rb/20261107-090158-rmtdx`（tdx 删除回滚包）保留中。
 
 
 ## 2026-10-30（第四十一轮）: 同步上游 2577 提交（零文本冲突）+ JS 工具链升到 node 26 / npm 12
