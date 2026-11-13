@@ -53,11 +53,20 @@ BASE=<上次上游 tip> REF=<合并前 HEAD> ./venv/bin/python <verify_private.p
 - `tests/hermes_cli/test_gui_command.py` —— 我们的 2 个 `electron_flags` 测试；上游反复重写该文件
 - `agent/auxiliary_client.py`、`apps/desktop/electron/main.ts`、`apps/desktop/src/i18n/*.ts`
 - `tui_gateway/methods_slash.py` —— 我们把 `quick_commands: type=alias` 重放到实时会话（`_quick_alias_target` / `_mirror_model_switch`，且塞进 `_mirror_slash_side_effects` 的 `try` 内）；上游反复改 `_mirror_slash_side_effects` 的 mirror 表与忙时守卫
+- `plugins/platforms/dingtalk/adapter.py` —— 我们 +303/−33（入站媒体 `_localize_media`：CDN URL 落盘、附件/图片大小上限、联系人缓存 `dingtalk_contacts.json`）；上游只做小改（错误脱敏、helper 改名）。**2026-11-13 实测它会真冲突**
 
 **零文本冲突 ≠ 零复核。** 每个重叠文件都要回答两件事：
 
 1. **变量/符号作用域**：自动合并可能让调用点引用的名字被搬走 —— `py_compile` 查不出，必须 `grep` 确认定义在**使用之前**且同一作用域。实例：`gateway/run_turn.py` 里我们传 `bridge_user_msg=message_text`，必须确认 `message_text` 的赋值仍早于该调用点。
 2. **判定前后语义**：我们该传"判定后的值"还是"判定前的值"。实例：bridge 镜像应显示 gateway **实际发出**的 `response`（silence 判定之后的值），否则 TUI 显示与实际发送不一致。
+
+**第三条（2026-11-13 新增）：上游给私有 helper 改名会静默打断我们的代码。** `gateway/platforms/base.py` 的 `_read_httpx_body_with_limit` 被改成公开的 `read_httpx_body_with_limit`（slack/weixin 都跟进了），我们的 dingtalk `_localize_media` 仍 import 旧名 → **只有跑测试才暴露**（`ImportError`），`py_compile` 与 `typecheck` 都发现不了。同步后除了 grep 私有符号，还要 grep 我们私有代码里 **`from <上游模块> import _x` 形式的私有导入**：
+
+```bash
+# 我们私有 delta 里对上游私有符号的导入（最容易因上游改名而断）
+git diff 90d6b98fd8 0cd738bcc1 --name-only | xargs grep -nE 'from (gateway|hermes_cli|agent|tools|tui_gateway)[a-z_.]* import _[a-z]' 2>/dev/null
+```
+
 
 ## R7 · 其他既存红线
 

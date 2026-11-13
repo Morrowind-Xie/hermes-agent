@@ -117,12 +117,17 @@ ExecStart=<repo>/.hermes/bin/hermes dashboard --port 9119 --no-open
 
 **背景：上游已从 npm 迁移到 pnpm**（`53a6ced422` `chore/pnpm-switch`）。`package-lock.json` 与 `.npmrc` 已被删除，取而代之 `pnpm-lock.yaml` + `pnpm-workspace.yaml`（`engineStrict` / `minimumReleaseAge: 20160` / `sideEffectsCache: false` / `strictDepBuilds: true` 全在里面）。根 `package.json` 的 `preinstall` 会 `exit(1)` 拒绝任何非 pnpm 安装。
 
-**版本门是硬门**：`devEngines.packageManager = {name: pnpm, version: "12.15.0"}`；`pnpm-workspace.yaml` 设了 `pmOnFail: ignore`（为让 lock 保持单 YAML 文档），于是 `scripts/build/node-deps.mjs:113` 自己再校验一次：`pnpm 12.15.0 is required (root package.json devEngines), found <ver> at <path>` → throw。
+**版本门（2026-11-13 起改形）**：`devEngines.packageManager` **已被上游删除**。现在由三处合成：
+- 根 `package.json` 的 `engines.pnpm = "^12"` → pnpm ≤11 直接 `ERR_PNPM_UNSUPPORTED_ENGINE`
+- `engines.npm` 的**值本身是一句拒绝提示**（`npm is refused here: run pnpm install --frozen-lockfile at the repository root`）
+- 根 `preinstall` 从 **`pm/lock.json` 的 `packages.pnpm.version`** 读出 pin 并**精确比对**（不是范围）：`ua === 'pnpm/' + pin` 才放行。**当前 pin = `12.15.0`，node pin = `26.12.1`**，与本机完全相同。
+  ⚠ 这条是**精确匹配**（不是 semver）→ 升级 pnpm 必须同时改 `pm/lock.json`，否则 `pnpm install` 直接 exit 1。
 
 **本机布局（2026-11-06 定案，零额外安装已就位）**：
 - node 26.12.1：`~/.hermes/tools/node-26.12.1-linux-x64`（`engines.node = ">=26"`）
-- pnpm 12.15.0：`~/.hermes/tools/pnpm-12.15.0-linux-x64`，`bin/pnpm` → `node_modules/pnpm/pnpm`（57 MB native 二进制）
-  - 安装方式：`npm install --prefix <该目录> pnpm@12.15.0`。npm 12 的 allowScripts 会**跳过** pnpm 的 `install.js`，但包内已自带 linux-x64 二进制，`bin/` 手动 `ln -sf ../node_modules/pnpm/pnpm bin/pnpm` 即可。
+- pnpm 12.15.0：`~/.hermes/tools/pnpm-12.15.0-linux-x64`，`bin/pnpm` → `../pnpm`（57 MB native 二进制）
+  - 安装方式：`npm install --prefix <该目录> pnpm@12.15.0`。npm 12 的 allowScripts 会**跳过** pnpm 的 `install.js`，但包内已自带 linux-x64 二进制。
+  - ⚠ **该目录会被 PM 重布局**（2026-11-13 实测）：PM 重新装 tools 时把二进制直接放到目录根（`pnpm`、`dist/`、`package.json`），**`node_modules/` 与 `bin/` 都不再有** → 我们的 `bin/pnpm` symlink 随之消失，`pnpm --version` 回落到系统 `/usr/local/bin/pnpm` 的 **10.28.2** → `ERR_PNPM_UNSUPPORTED_ENGINE`（`expected ^12, got 10.28.2`）。**修法**：`mkdir -p <dir>/bin && ln -sf ../pnpm <dir>/bin/pnpm && ln -sf ../pnpm <dir>/bin/pnpx`。
 - 系统 `/usr/local/bin/pnpm` 是 **10.28.2，不满足**；只有 PATH 前缀正确时才不会被它抢先。
 
 **规则**：安装 + 运行 tsc/eslint/vitest/build 一律用同一条 PATH 前缀：
@@ -140,20 +145,33 @@ pnpm install --frozen-lockfile
 - 补丁落点也随之改变：pnpm 严格隔离下 `@assistant-ui/core` **只在** `apps/desktop/node_modules/`，不在根；写入会穿透 symlink 改 content-addressable store 里的真实文件（`sideEffectsCache: false` 只保护依赖构建脚本，不保护这个）。
 - **`@assistant-ui/core` 上游仍 pin 0.2.23（未修）→ 补丁不可删**；脚本检测到 `shallowEqualOrUndefined` 才会自动转 no-op。
 
+**⚠ 增量 `pnpm install` 会留下不完整 store（2026-11-13 实测，最隐蔽的坑）**：在已有 `node_modules` 的树上跑 `pnpm install --frozen-lockfile`，返回 `PNPM_RC=0 / Done in 7.2s`，但 `.pnpm` 只有 **357** 项（完整应为 **1121**），`apps/desktop/node_modules/electron`、`react` 的 symlink **全部断链**（目标不存在）→ desktop `typecheck` 爆 **19961 行** `TS2307: Cannot find module 'electron' / 'react' / 'nanostores'`。
+判据与修法：
+```bash
+ls node_modules/.pnpm | wc -l          # 完整应为 1121；只有几百 = 残缺
+test -e apps/desktop/node_modules/electron/package.json || echo "断链"
+# 修：清树重装（5.5s，store warm）
+rm -rf node_modules apps/*/node_modules ui-tui/node_modules ui-tui/packages/*/node_modules web/node_modules tests-js/node_modules
+pnpm install --frozen-lockfile          # → .pnpm = 1121
+```
+
+**⚠ `tests-js` 的项目名是 `@hermes/root-tests`**（不是目录名）：`pnpm install --filter tests-js` 会 `Scope: 0 of 8 workspace projects` 什么都不装；要用 `--filter @hermes/root-tests...` 或 `--filter ./tests-js`。上游 `apps/desktop/tsconfig.electron.json` 现在会把 `tests-js/**` 纳入检查，该 workspace 缺 `node_modules` 时同样是成片的 `TS2307`（`@playwright/test`、`vitest`、`zod`、`js-yaml`）。
+
 **实测（2026-11-06 第四十二轮）**：pnpm 12.15.0 + node 26.12.1 → `pnpm install --frozen-lockfile` 覆盖全部 8 个 workspace、1121 包、16.9s，`✓ Lockfile passes supply-chain policies (1209 entries in 11.4s)`；清树重装 5.4s，postinstall 打印 `✓ assistant-ui render-loop patch: applied to @assistant-ui/core`。
+
+**实测（2026-11-13 第四十三轮）**：同版本；清理重装 5.5s → `.pnpm` 1121，`MARKER=1`（store 里的补丁仍在，postinstall 打印 `already applied` 是**真**的，不是假阳性 —— 假阳性只在根 `node_modules` 有陈旧 `@assistant-ui` 时出现）。随后 desktop `typecheck` 0 error、`eslint --quiet` RC=0、vitest 30 passed、web/ui-tui typecheck+lint 全 RC=0、web build 5.08s、desktop build 51.19s。
 
 **历史（npm 时代，仅作回滚材料）**：2026-10-30 ~ 11-05 用 `~/.hermes/tools/npm-12.0.2-linux-x64` + `engines.npm = "<11.10.0 || >=11.17.0"`，`npm ci` = 1288 包 / 44s。上游已删掉 `engines.npm` 与那份 `.npmrc`，**不要再照那套执行**。
 
-**pre-commit 的 ruff（2026-10-17 定案）**：本机任何 Hermes 环境里都没有 `ruff`，`lefthook` 的 `lint python` 会 `sh: ruff: not found`（exit 127）并让 commit 失败。已装 shim `~/.local/bin/ruff`，它从 `pyproject.toml` 的 dev 组读出 pin，用 `uvx --from ruff==<pin>` 执行：
+**pre-commit 的 lint python（2026-11-13 改形）**：上游把 `lefthook.yml` 的 `lint python` 从 `ruff check …` 改成 **`just ruff {staged_files}`**（`justfile` 里 `ruff +files:` 再转 `scripts/hermes-python -m scripts.code_health.ruff_runner check --config ruff.pre-commit.toml`）。`just` 不在 PATH 时 commit 会以 `sh: 1: just: not found` / exit 127 失败。已装 shim：
 
 ```bash
-#!/bin/sh
-repo=/home/morrowind/hermes-agent
-pin=$(sed -n 's/.*"ruff==\([0-9][0-9.]*\)".*/\1/p' "$repo/pyproject.toml" | head -1)
-exec /home/morrowind/.local/bin/uvx --from "ruff==${pin:-0.15.10}" ruff "$@"
+ln -sf ~/.hermes/tools/just-1.59.0-linux-x64/just ~/.local/bin/just   # ~/.local/bin 已在 PATH
 ```
 
-`~/.local/bin` 已在 PATH 内，`git commit` 直接可用。⚠ 同步会整体 stage 数千文件，lefthook 会检查**全部** staged 文件（不只是你改的那几个），上游旧代码在新 pin 下可能命中新规则（2026-10-17 实测 3 处 UP：`Optional["threading.Event"]`、`Dict`、`timezone.utc`）。
+`~/.local/bin/ruff` 的旧 shim 仍可保留（`just ruff` 走的是 `scripts/hermes-python`，不依赖它）。实测（2026-11-13）`just ruff` 打印 `All checks passed!`。
+
+⚠ 同步会整体 stage 数千文件时，lefthook 会检查**全部** staged 文件（不只是你改的那几个），上游旧代码在新 pin 下可能命中新规则（2026-10-17 实测 3 处 UP：`Optional["threading.Event"]`、`Dict`、`timezone.utc`）。大合并仍建议 `--no-verify`，但**独立的定向 typecheck/eslint 一步都不能省**。
 
 
 **不要点桌面端的 "Install Hermes locally"**：它跑官方 `install.sh` 分阶段流程，会克隆**上游**仓库到 `~/.hermes/hermes-agent`（不是本 fork），留成半成品后会让桌面端一直卡在首次运行界面（2026-09-26 已发生一次，清除见第九轮日志）。

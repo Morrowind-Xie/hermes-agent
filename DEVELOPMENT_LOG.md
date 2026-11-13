@@ -3,6 +3,96 @@
 > **时间线索**：最新的记录在最顶端，按时间倒序排列。
 
 ---
+## 2026-11-13（第四十三轮）: 同步上游 7840 提交（3 个真冲突）+ 两次 pnpm 环境事故
+
+### 背景（数字）
+
+- **新的稳定 tag**：`v0.23.1`（2026-11-09 16:24 −08，`3b4215785`），未并入 HEAD，距当时的 tip **5445** 提交。我们此前并入的最高稳定 tag 是 `v0.23.0`。
+- 上游 tip：`f2997d60bf5`（2026-11-13 03:35 −08）`chore(catalog): review disclosure for tradytics`；上次同步点 `0cd738bcc1`（2026-11-07）。
+- `git rev-list --left-right --count main...origin/main` = **156 / 7840**。
+- 差异规模：**5172 files changed, 246112 insertions(+), 55292 deletions(-)**；状态 A 2925 / M 2170 / D 64 / R 9。**约为上轮（2754 文件）的 1.9 倍**。
+- 热点目录：`plugin-catalog` 1438、`contributors/emails` 668、`tests/gateway` 527、`apps/desktop` 353、`hermes_cli` 206、`tests/hermes_cli` 166、`gateway` 147、`tools` 112、`tests/tools` 104、`agent` 104、`ui-tui/src` 99、`tests/agent` 98、`plugins/platforms` 94、`evals/delegation_grouping` 89（新目录）、`website/docs` 86。
+
+### 流程
+
+1. **预检**：`dirty=0`、`main == fork/main (0/0)`；回滚包 `/tmp/rb/20261113-221504-sync43`（21 文件）。当时服务 PID 406/409/404（机器已重启过一次）。
+2. **冲突预演**：`merge-tree` → 3 个冲突，**全部命中我们的私有 delta**（上轮是零冲突）。
+3. **合并**：`git merge origin/main --no-edit` → merge commit **`0b5d8d92d95`**。
+4. **R5 逐行存活**：`BASE=90d6b98fd8`（上轮 merge 第二父，已用 `git rev-parse 6a83f25e46^2` 交叉验证）`REF=0cd738bcc1` → **files_checked=42 / added_lines_checked=2410 / expected_rewrites_hit=2 / missing_total=0**。
+5. **R6 语义复核**：见下节。
+6. **验证链（全串行）**：pytest 定向 → `uv lock --check` → pnpm 清树重装 → desktop typecheck → desktop eslint → 定向 vitest → web/ui-tui typecheck+lint → web build → desktop build → 探针。
+
+### 冲突与取舍（3 个，全部真冲突）
+
+| # | 文件 | 我们的 | 上游的 | 解法 |
+|---|---|---|---|---|
+| 1 | `gateway/run_turn.py`（**2 处**） | +76/−1（bridge takeover 85 行 + `bridge_user_msg`） | +76/−152（把 resolve/prepare 抽成 `run_preagent_setup()`，新增 `hook_ctx`/`channel` 返回） | 块1：**保留我们的 bridge takeover（201-275）** + 接上游的 `run_preagent_setup`（删掉旧的 `resolved = ...` / `_hmwa_prepare_turn` 两段，避免重复 setup）。块2：取上游的 `FooteredReply(response, _footer_line)`，**保留 `bridge_user_msg=message_text`** |
+| 2 | `plugins/platforms/dingtalk/adapter.py` | +303/−33（入站媒体 `_localize_media` 等） | +4/−4（send 的 except 块改用 `describe_proxy_error` + `env_proxy_for_redaction` 脱敏） | 取上游版本（更完善，且 `describe_proxy_error`/`env_proxy_for_redaction` 已在第 54 行自动 import）；我们的 303 行在别处，未受影响 |
+| 3 | `package.json` | +1（postinstall 挂 render-loop 补丁） | +4/−9（`preinstall` 改成从 `pm/lock.json` 读 pnpm pin 精确比对） | 取上游新 `preinstall`，**把补丁重新挂回 postinstall** |
+
+### R6 语义复核结论
+
+- `run_turn.py` 顺序：bridge 块 **201** → `run_preagent_setup` **276** → 解包 `(…, hook_ctx, channel)` **280** → `message_text` **284** → `bridge_user_msg=message_text` **346** ✓（赋值早于使用；`hook_ctx` 被用 3 次、`channel` 4 次，上游新变量都被消费）
+- `_hmwa_post_turn_hooks(self, hook_ctx, agent_result, response, bridge_user_msg: str = "")` 签名**未变**（`run_turn_persistence.py:291`）✓
+- `run_preagent_setup(runner, event, source, quick_key, run_generation) -> tuple[Optional[tuple], Any]` 与我们的调用 `run_preagent_setup(self, event, source, _quick_key, run_generation)` **匹配** ✓
+- `tui_gateway/methods_slash.py` 上游**未改动** → slash 私有补丁（518/543/558）零冲突 ✓
+- `cli.py:888` 类头两侧 mixin 都在（`CLIBacktrackMixin` … `CLIBridgeMixin`）✓
+- 5 个本地独有文件（`cli_bridge_mixin.py`、render-loop 脚本、`plugins/web/kimi/*`、`test_quick_alias_mirror.py`）全部 `theirs:N` ✓
+
+### 三个环境事故（本轮最费时的部分，已全部写进 R14/R6）
+
+**① 上游给私有 helper 改名，静默打断我们的 dingtalk 代码**
+`gateway/platforms/base.py` 的 `_read_httpx_body_with_limit` → 公开的 `read_httpx_body_with_limit`（slack/weixin 都跟进了）。我们的 `_localize_media` 仍 import 旧名 → `ImportError: cannot import name '_read_httpx_body_with_limit'`，`tests/gateway/test_dingtalk.py` 3 个测试红。`py_compile` 与 `typecheck` 都发现不了，**只有 pytest 能抓**。修：两处改名（import + 调用），`34 passed / 0 failed`。
+
+**② PM 重布局 tools 目录 → pnpm 回落到系统 10.28.2**
+`~/.hermes/tools/pnpm-12.15.0-linux-x64` 被 PM 重装成「二进制直接放根」的布局，`node_modules/` 与 `bin/` 消失 → 我们的 `bin/pnpm` symlink 失效 → PATH 前缀命中的是 `/usr/local/bin/pnpm` **10.28.2** → `ERR_PNPM_UNSUPPORTED_ENGINE (expected ^12, got 10.28.2)`。修：`mkdir -p <dir>/bin && ln -sf ../pnpm <dir>/bin/pnpm`。
+
+**③ 增量 `pnpm install` 留下残缺 store（最隐蔽）**
+`pnpm install --frozen-lockfile` 返回 `RC=0 / Done in 7.2s`，但 `node_modules/.pnpm` 只有 **357** 项（应 **1121**），`electron`/`react` 的 symlink **全部断链** → desktop `typecheck` 爆 **19961 行** `TS2307: Cannot find module 'electron' / 'react' / 'nanostores'`。
+修：清树重装（5.5s）→ `.pnpm` = 1121，`typecheck` **0 error**。
+附带发现：`tests-js` 的项目名是 **`@hermes/root-tests`**（`--filter tests-js` 是 `Scope: 0 of 8`，什么都不装）；上游 `tsconfig.electron.json` 现在检查 `tests-js/**`，该 workspace 缺 `node_modules` 时也是成片 `TS2307`。
+
+**④ 上游把 pre-commit 改成 `just ruff`，本机无 `just`**
+`sh: 1: just: not found` / exit 127 → commit 直接失败。修：`ln -sf ~/.hermes/tools/just-1.59.0-linux-x64/just ~/.local/bin/just`，之后 `just ruff` 打印 `All checks passed!`。
+
+**⑤ 系统在 23:31 重启**，`/tmp` 被清空 → 同步前的回滚包与所有验证脚本丢失。**代码无恙**（merge 已 commit `0b5d8d92d95`，工作区的 dingtalk 修复也在），重建了 `/tmp/rb/20261114-000039-postreboot`。
+
+### 验证结果（全串行，可复算）
+
+| 项 | 结果 |
+|---|---|
+| pytest 定向（`test_quick_alias_mirror` 6 + kimi 8 + dingtalk 34 + `test_gui_command` 75 + xiaomi 16） | **139 passed / 0 failed**（20 个 macos/windows lane skipped） |
+| `uv lock --check` | **rc=0**（355 packages，443ms） |
+| `pnpm install --frozen-lockfile`（清树后） | **RC=0**，5.5s，`.pnpm` **1121**，`Lockfile passes supply-chain policies (1209 entries)` |
+| render-loop 补丁 | `MARKER=1`、根 `node_modules` 无 `@assistant-ui`（**真 applied**，非假阳性） |
+| desktop `typecheck`（4 个 tsc project） | **0 error / RC=0** |
+| desktop `eslint src/ electron/ --quiet` | **RC=0**（0 error） |
+| 定向 vitest（bootstrap-platform + runtime-repository） | **2 files / 30 tests passed，RC=0** |
+| web `typecheck` / `lint` | **RC=0 / RC=0** |
+| ui-tui `typecheck` / `lint` | **RC=0 / RC=0** |
+| web build | **RC=0**（5.08s） |
+| desktop build | **RC=0**（vite 51.19s + bundles） |
+| R7 bridge 探针 | `('_handle_bridge_command', True) 44` ✓ |
+| R4 `/kimi` `/ds` 探针 | `('model','kimi-k3.1-pro --provider kimi-coding-cn')` / `('model','deepseek-flash --provider deepseek')` ✓ |
+| `run_preagent_setup` | 可调用 ✓；`bridge_user_msg` 仍在 `run_turn_persistence.py` ✓ |
+
+### 下次同步的注意点
+
+1. **`gateway/run_turn.py` 现在会周期性真冲突**：上游持续重构 setup 链（本轮把 resolve/prepare 吞进 `run_preagent_setup`）。解冲突的口径固定为「**bridge takeover 永远在 setup 之前**，`bridge_user_msg` 永远挂在 `_hmwa_post_turn_hooks` 上」。
+2. **每次同步都要跑一次"私有符号导入"扫描**（R6 第三条）：上游改名私有 helper 不会报错，只有 pytest 抓得到。
+3. **pnpm 一律清树重装**，不要相信增量 `install` 的 `RC=0`。判据：`ls node_modules/.pnpm | wc -l` 应为 1121。
+4. **`just` shim 要跟着 tools 目录版本走**（现在是 `just-1.59.0-linux-x64`）；PM 重装 tools 后同样会失效。
+5. **版本门现在是 `pm/lock.json` 的精确 pin（12.15.0）**，不是 semver 范围 —— 上游升级 pnpm 时必须同时更新 `pm/lock.json` 与本机二进制。
+
+### 待办
+
+1. **【需确认】** 本轮回滚包（`/tmp/rb/20261114-000039-postreboot`）只含配置与 unit，**不含同步前代码状态**（原回滚包随 `/tmp` 被清）。如需回滚代码：`git reset --hard 0cd738bcc1`（会丢弃 merge）。
+2. **【未做】** gateway/webui/dashboard 尚未重启（本轮代码改动较大：`run_turn.py` + dingtalk）。需在推送后重启并验活。
+3. **【已做】** `.clinerules` 更新：R14（版本门改形 + 坏 store 判据 + pnpm bin 重布局 + `@hermes/root-tests` + `just`）、R6（新增 dingtalk 重叠文件 + 私有符号导入扫描）。
+4. **【临时物】** `/tmp/sync43/`（本轮脚本）、`/tmp/rb/20261114-000039-postreboot/`。
+
+
+
 ---
 
 ## 2026-11-06（第四十二轮）: 同步上游 2040 提交（3 处冲突）+ JS 工具链从 npm 迁到 pnpm 12.15.0
