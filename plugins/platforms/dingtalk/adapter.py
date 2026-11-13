@@ -566,7 +566,7 @@ class DingTalkAdapter(BasePlatformAdapter):
             logger.warning("[%s] httpx unavailable — dropping inbound media", self.name)
             return [], []
         from gateway.platforms.base import (
-            _read_httpx_body_with_limit, cache_audio_from_url, cache_document_from_bytes_async,
+            read_httpx_body_with_limit, cache_audio_from_url, cache_document_from_bytes_async,
             cache_image_from_url, cache_video_from_bytes_async,
         )
         ext_content = (getattr(message, "extensions", {}) or {}).get("content")
@@ -589,7 +589,7 @@ class DingTalkAdapter(BasePlatformAdapter):
                     else:
                         async with client.stream("GET", url) as response:
                             response.raise_for_status()
-                            data = await _read_httpx_body_with_limit(response, media_type=media_type or "media")
+                            data = await read_httpx_body_with_limit(response, media_type=media_type or "media")
                         if media_type == "video":
                             path = await cache_video_from_bytes_async(data, self._media_ext(url) or ".mp4")
                         else:
