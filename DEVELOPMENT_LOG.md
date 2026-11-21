@@ -3,6 +3,112 @@
 > **时间线索**：最新的记录在最顶端，按时间倒序排列。
 
 ---
+## 2026-11-21（第四十四轮）: 同步上游 4702 提交（零文本冲突）+ 上游存储层整包重组
+
+### 背景（数字）
+
+- **新的稳定 tag**：`v0.23.3`（2026-11-19 12:51 −08，`caafe5389ae`），未并入 HEAD，距 tip 318 提交。本轮跨越 **2 个**稳定 tag：`v0.23.2`（11-16，`ae2a81ccc00`）、`v0.23.3`。此前并入的最高稳定 tag 是 `v0.23.1`。
+- 上游 tip：`242315ce571`（2026-11-20 18:57 −06）`test(skills): pin that a skill_view dedup stub keeps the entry it points at`；上次同步点 `f2997d60bf5`（2026-11-13）。
+- `git rev-list --left-right --count main...origin/main` = **159 / 4702**。
+- 差异规模：**6368 files changed, 372144 insertions(+), 112034 deletions(-)**（上轮 5172 文件）。
+- 热点目录：`tests/gateway` 966、`apps/desktop` 404、`tests/hermes_cli` 398、`tests/persistence_sqlite` 389、`tests/tools` 343、`tests/agent` 339、`tests/contracts` 276、`tests/tui_gateway` 185、`contributors/emails` 160、`website/docs` 130、`persistence/sqlite` 125、`plugins/platforms` 64。
+- 上游**删除 163 个文件**：60+ 个顶层 `hermes_state_*.py` → 新包 `persistence/` + `session_rules/` + `utils/`（目录，取代 `utils.py`）；另有 `gateway/session_admission.py`、`agent/message_content.py`、`agent/context_compressor_retry.py`、`tests/hermes_state/` 整目录。
+
+### 流程
+
+1. **预检**：`dirty=0`、`main == fork/main (0/0)`；gateway PID 519 / webui PID 520，均 active/running、NRestarts=0；8 个 profile（default + coding/exam/fitness/invest/music/topic1/work）。
+2. **回滚包**（R12）：`/tmp/rb/20261121-094526-sync44`（20 项：8 个 profile 的 `.env`+`config.yaml`、默认 `.env`/`config.yaml`、`gateway_state.json`、`unit.service`、`cuda.conf`、两份 `systemctl show`）。
+3. **冲突预演**：`git merge-tree --write-tree --name-only main origin/main` → `rc=0`，仅返回 tree oid，**零冲突文件**。
+4. **合并**：`git merge origin/main --no-edit --no-verify` → 15 个文件 `Auto-merging`，其余直接变更；merge commit **`48ab9a83d96`**（父 `9e088300c6c` + `242315ce571`）；冲突标记 `0`。
+5. **R5 逐行存活校验**（脚本 `/tmp/sync44/verify_private.py`）：`BASE=f2997d60bf5` `REF=9e088300c6c` → **files_checked=42 / added_lines_checked=2427 / expected_rewrites_hit=1 / missing_total=0**。
+6. **R6 语义复核**：见下节（15 个重叠文件逐个过）。
+7. **验证链（全串行）**：pytest 定向集 → pytest `tests/persistence_sqlite/` → pytest 私有 delta 关联 → `uv lock --check` → `pnpm install --frozen-lockfile` → desktop typecheck → desktop eslint → 定向 vitest → web `check` → ui-tui `check` → web build → desktop build → R7/R4 探针 → `just ruff`。
+
+### 冲突与取舍
+
+**零文本冲突**，但 163 个上游删除文件必须确认无残留导入：上游提供了 `hermes_agent/compat/moves.py` 兼容层（`agent.message_content` → `session_rules.turns`、`hermes_state_wal` → `sqlite_support` 等），旧导入仍可用 → 我们的 `agent/auxiliary_client.py` 无需改（它引用 `agent.message_content` 的那处也未被我们改动）。
+
+### R5 唯一白名单
+
+- `cli.py` 类头单行被合并重写成含 `CLIBacktrackMixin`（行首，上游新增）+ `CLIBridgeMixin`（行尾，我们）的形态 —— 两者都在，语义不变。
+
+### R6 语义复核结论（15 个重叠文件）
+
+| 文件 | 复核结论 |
+|---|---|
+| `gateway/run_turn.py`（+10/−22） | bridge takeover 块 265-272 保留；`run_preagent_setup` 275 → 解包 `(…, hook_ctx, channel)` 278；`message_text` **282 赋值** → `bridge_user_msg=message_text` **344 使用**（同函数、赋值在前 ✓）；`response` 来自 331 `_hmwa_shape_agent_response`（silence 判定）→ 339 wording/reasoning → 343 footer = **判定后的值** ✓ |
+| `gateway/run_turn_persistence.py`（+25/−26） | `_hmwa_post_turn_hooks(self, hook_ctx, agent_result, response, bridge_user_msg: str = "")` 签名未变（299 行）✓ |
+| `tui_gateway/methods_slash.py`（+57/−25） | `_quick_alias_target` 定义 548；`_mirror_model_switch` 定义 543、**601 在 `_mirror_slash_side_effects` 内被赋给 `mirror`** ✓；`# health: allow BLE001` 白名单仍在 531 |
+| `agent/auxiliary_client.py`（+61/−97） | 上游把 `flatten_message_text` 从被删的 `agent.message_content` 迁到 `session_rules.turns`；**我们未改该引用** ✓，且 compat 层兜底 |
+| `apps/desktop/electron/main.ts`（+73/−260） | IME 上报私有段完好：`INPUT_METHOD_REPORT = describeLinuxInputMethod()` 在 **2182**（原 2193）✓ |
+| `plugins/platforms/dingtalk/adapter.py`（+1/−1） | `_localize_media` 定义 556 / 调用 529 ✓；私有 import 全部用公开名 `read_httpx_body_with_limit`（569 行）✓ |
+| `cli.py`（+4/−3） | 类头 888 行含 `CLIBridgeMixin` ✓ |
+| `hermes_cli/commands.py`（+3/−2） | `CommandDef("bridge", …, aliases=("br",), cli_only=True)` 100-102 ✓ |
+| `locales/en.yaml` / `zh.yaml`（+48/−6 / +47/−6） | 仅新增文案键，无私有键冲突 |
+| `agent/reasoning_effort.py`、`apps/desktop/src/app/chat/runtime-repository.ts`、`hermes_cli/cli_{chat_turn,init,tui_runtime}_mixin.py`、`gateway-command-parity.md` | 自动合并，私有段不在上游改动区间 |
+
+上游**完全未触碰**的私有 delta：`hermes_cli/cli_bridge_mixin.py`、`scripts/patch-assistant-ui-render-loop.mjs`、`plugins/web/kimi/*`、`tests/tools/test_web_providers_kimi.py`、`tests/tui_gateway/test_quick_alias_mirror.py`、`hermes_cli/main_desktop.py`、`hermes_cli/linux_desktop_entry.py`、`package.json`、`tests/hermes_cli/test_gui_command.py`、`tests/gateway/test_dingtalk.py`、`plugins/platforms/dingtalk/inbound.py`、`plugins/model-providers/{custom,xiaomi}/*`、`bootstrap-platform.{ts,test.ts}`、`runtime-repository.test.ts`、`desktop-slash-registry.json`、`tests/fixtures/provider_wire_snapshot.json`。
+
+### 环境 / 依赖变化（本波）
+
+| 项 | 变化 |
+|---|---|
+| `pm/lock.json` → uv | **0.12.3 → 0.13.5**（本机已有；`uv lock --check` 用它 rc=0） |
+| `pm/lock.json` → python | 3.14.7 → **3.14.9**（test environment 已按新 pin 重建） |
+| pnpm / node pin | **未变**（12.15.0 / 26.12.1）→ R14 精确匹配门安全 |
+| `pyproject.toml` 依赖 | `opentelemetry-sdk` / `-exporter-otlp-proto-http` **1.45.1 → 1.45.2**；build requires 加 `wheel==0.48.0` |
+| ruff 配置 | `[tool.ruff*]` 与 `ruff.pre-commit.toml` **被上游删除**，合并进顶层 `ruff.toml`；`just ruff <files>` 实测 `All checks passed!` |
+| `pnpm-lock.yaml` | 8 行（+4/−2 包），`.pnpm` 仍 **1121** |
+| `package.json` postinstall | 上游本轮**未改** → 我们的 render-loop 补丁行安全保留（第 8 行确认在位） |
+
+### 验证结果（全串行，可复算）
+
+| 项 | 结果 |
+|---|---|
+| pytest R4 常规集（quick_alias_mirror / kimi / dingtalk / test_gui_command / xiaomi / test_message_content） | **6 files / 141 passed / 0 failed / 20 skipped**（macos+windows lane） |
+| pytest `tests/persistence_sqlite/`（上游存储层重构核心） | **363 files / 2812 passed / 0 failed / 17 skipped**；1 文件并发 300s 超时 → 单跑 **3 passed（130s）** |
+| pytest 私有 delta 关联（`slash_*` / `*mirror*` / `*bridge*` / `auxiliary_client*`） | **46 files / 483 passed / 1 failed / 1 skipped**；唯一失败 `test_slash_worker_mcp_discovery` = 负载型 flaky（见事故②） |
+| `uv lock --check`（uv 0.13.5） | **rc=0**（355 packages，449ms） |
+| `pnpm install --frozen-lockfile` | **RC=0**（7.2s，+4/−2，"1209 entries"）；`.pnpm` **1121** |
+| render-loop 补丁 | `MARKER=1`、根 `node_modules` 无 `@assistant-ui`（**真 applied**，非假阳性） |
+| desktop `typecheck`（4 个 tsc project） | **0 error** |
+| desktop `eslint src/ electron/ --quiet` | **0 error**（日志仅 1 行） |
+| 定向 vitest（bootstrap-platform + runtime-repository） | **2 files / 30 tests passed** |
+| web `check`（typecheck + test + lint） | **0 TS error / 79 files 535 tests passed / 0 lint error（29 warnings）** |
+| ui-tui `check`（build:ink + typecheck + i18n + test + lint） | **0 TS error / 260 files 2006 tests passed（2 skipped）/ 0 lint error（13 warnings）** |
+| web build | **RC=0**（10.57s，产出 `hermes_cli/web_dist/index.html`） |
+| desktop build | **RC=0**（34.86s） |
+| R7 bridge 探针 | `('_handle_bridge_command', True) 44` ✓ |
+| R4 `/kimi` `/ds` 探针 | `('model','kimi-k3.1-pro --provider kimi-coding-cn')` / `('model','deepseek-flash --provider deepseek')` ✓ |
+
+### 三个环境事故
+
+**① 合并后 Cline 的 PTY 通道整体失效（最费时）**
+合并命令本身 `RC=0`、日志完整，但此后 **12 次** `run_commands` 全部 300s 无输出（连 `echo hi` 都是），而 `editor` 写文件、`search_codebase`、`read_files` 全部正常，`/proc/loadavg` 0.69、`MemAvailable` 13 GB → 排除资源与磁盘。用户在 VS Code 里 *Kill All Terminals* 后立即恢复。**下次遇到同样症状（工具超时但文件通道正常）不要怀疑 git/磁盘，先让用户换终端。**
+
+**② `test_slash_worker_mcp_discovery` 失败 = 负载型 flaky，非回归**
+失败信息 `slash worker did not answer /version within 60s`。手动用 test-environment 解释器直接跑 `tui_gateway.slash_worker` → **能正常响应**（`Hermes Agent v0.23.3+478.g48ab9a8`），但耗时 **46s**；测试自身配置 `mcp_discovery_timeout: 30`，两者相加超 60s 预算。LOG 第 1413 / 1424 行早已把它列为「单跑即过，勿误判回归」的负载型 flaky，且该测试文件本轮**零改动**。**结论：环境性，未改代码。**
+
+**③ ui-tui `vitest` 子进程被 job control 挂起（`Stopped (tty input)`）**
+后台 `nohup pnpm run check` 的 vitest worker 尝试读 tty → 整个 job 变 `T` 状态、永不完成。修：`pkill -9 -f 'vitest@4.1.12'` 后改用 `setsid nohup … < /dev/null`，一次通过。
+
+### 下次同步的注意点
+
+1. **上游仍在快速重组存储层**：本轮 `hermes_state_*.py` 全量迁入 `persistence/` + `session_rules/`，`agent/message_content.py` → `session_rules.turns`。下次同步先看 `hermes_agent/compat/moves.py` 的映射表，它决定旧导入是否还活。
+2. **`ruff.pre-commit.toml` 已不存在**：R14 里「pre-commit 走 `--config ruff.pre-commit.toml`」的描述已过时（现为 `just ruff` → `scripts/code_health/ruff_runner check`，配置读 `ruff.toml`）。`just` shim 仍必须存在。
+3. **uv pin 已升到 0.13.5、python 3.14.9**：`uv lock --check` 与 `scripts/run_tests.sh` 都必须用这组版本；旧 `uv-0.12.3` 目录仍在 `~/.hermes/tools/`，别误用。
+4. **`tests/hermes_state/` 已整目录消失**，改名为 `tests/persistence_sqlite/`（363 文件、~2815 测试、跑满约 10 分钟）。R2 的「热点目录测试」应指向新路径。
+5. `test_slash_worker_mcp_discovery` 在本机 12 workers 下必红、单跑也可能因 46s 冷启动 + 30s MCP 探测超预算。判回归前先手动跑 worker 计时。
+
+### 待办
+
+1. **【已做】** gateway / webui 已重启并验活：gateway `MainPID=203160 / active·running / NRestarts=0 / served_profiles=8`，platforms 含 `weixin`·`api_server`·`feishu`·`webhook`·`qqbot` + 7 个 `*:dingtalk`；ExecStart 仍指向 `<repo>/.hermes/bin/hermes`（PM shim，符合 R9）。webui `MainPID=205059 / active·running`，日志 `HERMES_DASHBOARD_READY port=9119`。
+   启动期两条**非本轮引入**的告警：① weixin `iLink sendmessage session not ready … the user must send the bot a message first`（通道自身会话过期，历史已见）；② `gateway.shutdown_flush` 恢复旧 pending message 时报 `FOREIGN KEY constraint failed: session '20260904_073422_e78cb57b' has no row`（旧数据行缺失，新存储层 FK 更严格；不影响运行）。
+2. **【未做】** `.clinerules` R14 里 `ruff.pre-commit.toml` 的描述需按本轮更新；R2 热点目录清单可补 `tests/persistence_sqlite`。
+3. **【临时物】** `/tmp/sync44/`（R5 脚本）、`/tmp/rb/20261121-094526-sync44/`（回滚包）、`/tmp/t44/`（验证日志）。
+
+---
+
 ## 2026-11-13（第四十三轮）: 同步上游 7840 提交（3 个真冲突）+ 两次 pnpm 环境事故
 
 ### 背景（数字）
